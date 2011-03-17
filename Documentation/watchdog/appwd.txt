@@ -1,0 +1,200 @@
+Last reviewed: 26/05/2010
+
+
+The Appliance Watchdog framework and API
+
+Copyright 2010 DoréDevelopment ApS
+Author: Esben Haabendal <eha@doredevelopment.dk>
+
+This document describes the state of the Appliance Watchdog code
+(appwd) before being submitted for upstream merge.
+
+
+
+Introduction:
+
+The purpose of the Appliance Watchdog framework is to support
+development of robust appliances using embedded Linux, by providing an
+easy way to build Linux systems that requires one or more
+applications/services/features running. It should be useful for
+industrial embedded, CE (consumer electronic) devices, and similar
+application areas.
+
+The Appliance Watchdog implements a driver framework for hardware
+watchdog timers, providing a kernel API for writing hardware watchdog
+timer drivers, Appliance Watchdog Timer API (wdt), and a user-space
+API for applications that should be monitored, Appliance Watchdog
+Device API (wdd).
+
+An Appliance Watchdog consits of an Appliance Watchdog Monitor (wdm),
+one or more Appliance Watchdog Devices (wdd), and one or more
+Appliance Watchdog Timer Drivers (wtd).
+
+As a consequence, the timeout of hardware watchdog timers are
+de-coupled from the various software timeouts, allowing configuration
+of a number of different timeouts.  Appliance Watchdog is fx. actively
+used in systems with 200 ms hardware watchdog timer timeout, while
+allowing 10 seconds from boot to application startup, and flexible
+application keep-alive timeout settings.
+
+Appliance Watchdog code is found in drivers/watchdog/appwd
+
+
+
+Appliance Watchdog Device
+
+The Appliance Watchdog Device API is an extended user-space API
+compared to the Linux Watchdog driver API. The basic watchdog
+functionality of the Appliance Watchdog Device API is compatible with
+the Linux Watchdog driver API, so clients can to some extend work
+seamlessly with both APIs.  Some features of the Linux Watchdog driver
+API is not supported by the Appliance Watchdog Device API, and
+additional features not supported by Linux Watchdog driver API is
+provided by Appliance Watchdog API.
+
+You should be familiar with the Linux Watchdog driver API, and if not,
+please read Documentation/watchdog/watchdog-api.txt before proceeding.
+
+The Appliance Watchdog can be configured to provide 1 or more watchdog
+device interfaces as
+
+  /dev/watchdogN
+
+with N being a number from 0 to N-1 (with N being the number of
+configured wathcdog devices.
+
+These devices conform to the Linux Watchdog driver API with respect to
+open(), write() and close(). "Magic Close" and "Disable watchdog
+shutdown on close" features can be enabled/disabled independently for
+each device.
+
+TODO: current implementation does not implement this right.
+
+The following ioctl commands from the Linux Watchdog driver API are
+also supported:
+
+  WDIOC_KEEPALIVE
+  WDIOC_SETTIMEOUT
+  WDIOC_GETTIMEOUT
+  WDIOC_GETSUPPORT
+  WDIOC_GETSTATUS
+  WDIOC_GETBOOTSTATUS
+  WDIOC_SETOPTIONS
+
+The following flags are supported:
+
+  WDIOF_KEEPALIVEPING
+  WDIOF_MAGICCLOSE
+  WDIOF_SETTIMEOUT
+
+TODO: implement WDIOS_DISABLECARD and WDIOS_ENABLECARD for
+WDIOC_SETOPTIONS.
+
+The following additional ioctl commands (not part of Linux Watchdog
+driver API) are provided:
+
+  WDIOC_SETRESTARTTIMEOUT
+  WDIOC_GETRESTARTTIMEOUT
+  WDIOC_SETRECOVERTIMEOUT
+  WDIOC_GETRECOVERTIMEOUT
+
+There are also milliseconds variants of all the SET/GET timeout ioctl
+commands:
+
+  WDIOC_SETTIMEOUTMSEC
+  WDIOC_GETTIMEOUTMSEC
+  WDIOC_SETRESTARTTIMEOUTMSEC
+  WDIOC_GETRESTARTTIMEOUTMSEC
+  WDIOC_SETRECOVERTIMEOUTMSEC
+  WDIOC_GETRECOVERTIMEOUTMSEC
+
+
+
+Appliance Watchdog Device API provides a number of different timeouts:
+
+
+Keep-alive timeout:
+
+Controlled with WDIOC_SETTIMEOUT and WDIOC_GETTIMEOUT.
+
+This is the maximum allowed time between keep-alive signals for an
+open watchdog device. When this timeout is exceeded, the application
+(process) being monitored will be sent a SIGHUP signal, and wdd will
+wait for the application to restart (ie. close()/open() the device).
+
+Applications should install a SIGHUP handler, and do whatever it finds
+necessary to restart it self, including close() the watchdog device
+and open() it again.
+
+
+Restart timeout:
+
+Controlled with WDIOC_SETRESTARTTIMEOUT and
+WDIOC_GETRESTARTTIMEOUT.
+
+This is the timeout set when waiting for the application to
+restart. When this timeout is exceeded, the application (process)
+being monitored will be killed with a SIGKILL signal, and wdd will
+wait for the application to recover (ie. close()/open() the device).
+
+Applications should be managed with something like SysVinit, runit or
+upstart, to make sure they are started again when killed.
+
+
+Recover timeout:
+
+Controlled with WDIOC_SETRECOVERTIMEOUT and
+WDIOC_GETRECOVERTIMEOUT.
+
+This is the timeout set when waiting for the application to
+recover. When this timeout is exceeded, the application (process)
+being monitored will be declared dead, and wdm is responsible for
+rebooting the machine, and ultimately stop servicing hardware watchdog
+timers.  See the section Appliance Watchdog Monitor for details on
+this.
+
+
+Init timeout:
+
+This is the maximum time allowed for the initial open() of the
+watchdog device. It is started when wdm enters ACTIVE state. When this
+timeout is exceeded, the application (that should have opened the
+device) is declared dead, and wdm is responsible for rebooting the
+machine.
+
+This timeout cannot be changed from the configured value. When used as
+OpenFirmware driver, this timeout can be configured independently for
+each device.
+
+
+
+Appliance Watchdog Monitor
+
+The Appliance Watchdog Monitor is responsible for the overall
+life-cycle state machine, and for servicing registered Appliance
+Watchdog Timer Drivers.
+
+It starts in BOOT state.  When the first user-space application is
+started, the state machine transitions to ACTIVE.  A configurable boot
+timeout controls the maximum time waiting for the transition to
+ACTIVE.  When this timeout is exceded, the state machine is
+transitioned to REBOOT.
+
+In ACTIVE state, wdm waits for a wdd (application) to be declared
+dead, in which case the state machine is transitioned to REBOOT.
+
+When entering REBOOT state, a normal system reboot is initiated
+(SIGINT is sent to PID 1), and reboot timeout is started.  When reboot
+timeout expires, the state machine is transitioned to ZOMBIE.
+
+When entering ZOMBIE state, a last attempt at forcing a reboot is done
+(kernel_restart() is called), and no further keep-alive servicing of
+Appliance Watchdog Timer Drivers will be done.
+
+
+
+Appliance Watchdog Timer Driver
+
+TBD.  For now, take a look at wdt_gpio.c and wdt_mpc8xxx.c as a kind
+of reference for the wdt API.
+

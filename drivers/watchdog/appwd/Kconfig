@@ -1,0 +1,144 @@
+menuconfig APPWD
+	bool "Appliance Watchdog"
+	default n
+	help
+	  Say Y here to add support for the Appliance Watchdog.
+
+	  Appliance Watchdog is an extended driver model for managing
+	  hardware watchdog timers and providing watchdog interfaces
+	  for user-space applications, designed for providing the
+	  features needed for appliance like embedded systems.
+
+	  Appliance Watchdog supports multiple applications with
+	  configurable timeouts etc., short application keepalive
+	  timeouts combined with longer timeout on application
+	  startup, restart (actually, just killing) of failing
+	  applications before reverting to system restart. See
+	  Documentation/watchdog/appwd.txt for details.
+
+	  Appliance Watchdog does not rely on any of the traditional
+	  watchdog timer drivers, so unless you also need them, you
+	  should use either Appliance Watchdog or a traditiona
+	  Watchdog Timer driver. You specifically should not use both
+	  Appliance Watchdog and a traditional Watchdog Timer driver
+	  for the same hardware watchdog timers!
+
+if APPWD
+
+config OF_APPWD
+	bool "Appliance Watchdog Monitor as OpenFirmware driver"
+	depends on APPWD
+	default y
+
+config APPWD_BOOT_TIMEOUT
+	int "Boot timeout"
+	depends on APPWD && !OF_APPWD
+	default 60000
+	help
+	  This is the time (in milliseconds) that the watchdog will
+	  allow for the kernel to spend before starting first
+	  user-space process.  If exceeded, the wathcdog will stop
+	  servicing any attached watchdog timers and will try to
+	  reboot the system.
+
+config APPWD_REBOOT_TIMEOUT
+	int "Reboot timeout"
+	depends on APPWD && !OF_APPWD
+	default 60000
+	help
+	  This is the time (in milliseconds) that the watchdog
+	  monitor, will wait for a reboot.
+
+	  If exceeded the watchdog will ateempt to reset immediately
+	  and attached watchdog timers will not be serviced anymore.
+
+config APPWD_NUM_WDD
+	int "Number of user-space watchdog devices"
+	depends on APPWD && !OF_APPWD
+	default 1
+	help
+	  This is the number of watchdog devices exported to
+	  user-space. Can also be configured in FDT, which overrides
+	  this setting.
+
+config APPWD_WDD_INIT_TIMEOUT
+	int "Watchdog device initial timeout"
+	depends on APPWD && !OF_APPWD
+	default 0
+	help
+	  This is the time (in milliseconds) that each watchdog device
+	  will initially wait (after booting) for being opened.
+
+	  If a device is not openened before its init timeout, the
+	  watchdog monitor will be informed, and will stop servicing
+	  any attached watchdog timers and try to restart the
+	  system.
+
+	  A value of 0 disables init timeout, allowing the
+	  system to boot without the watchdog device being openened.
+
+config APPWD_WDD_KEEPALIVE_TIMEOUT
+	int "Watchdog device keep-alive timeout"
+	depends on APPWD && !OF_APPWD
+	default 5000
+	help
+	  This is the default timeout (in milliseconds) for watchdog
+	  devices, and can be changed run-time with the
+	  WDIOC_SETTIMEOUT ioctl command.
+
+config APPWD_WDD_RESTART_TIMEOUT
+	int "Watchdog device restart timeout"
+	depends on APPWD && !OF_APPWD
+	default 60000
+	help
+	  This is the default timeout (in milliseconds) that
+	  applications have to restart and reopen the watchdog device
+	  after being sent a SIGHUP signal.
+
+config APPWD_WDD_RECOVER_TIMEOUT
+	int "Watchdog device recovery timeout"
+	depends on APPWD && !OF_APPWD
+	default 60000
+	help
+	  This is the default timeout (in milliseconds) that
+	  applications have to restart and reopen the watchdog device
+	  after closing it or being killed with a SIGKILL signal.
+
+config APPWD_WDD_NOWAYOUT
+       bool "Disable magic close of watchdog devices"
+       depends on APPWD && !OF_APPWD
+       default no
+       help
+         By saying Y here, you will no longer be able to close the
+         user-space watchdog devices without causing the keep-alive
+         timeout to continue, thus most likely causing a reboot unless
+         you have setup the system to restart the application.
+
+	 Say N here, unless you know what you are doing.
+
+config APPWD_MAX_WDT
+	int "Maximum concurrent watchdog timers"
+	depends on APPWD
+	default 1
+	help
+	  The maximum number of concurrent watchdog timers to support.
+
+	  Unless you for some very special reason wants to use
+	  multiple watchdog timers with Appliance Watchdog at the same
+	  time, you should set it to 1.
+
+config APPWD_WDT_GPIO
+	bool "GPIO Appliance Watchdog Timer support"
+	select APPWD_WDM
+	help
+	  This adds support for GPIO based watchdog timers.
+
+config APPWD_WDT_MPC8xxx
+	bool "MPC8xx/MPC83xx/MPC85xx Appliance Watchdog Timer support"
+	depends on !8xxx_WDT
+	select APPWD_WDM
+	help
+	  This adds support for the integrated watchdog timer in
+	  Freescale MPC8xx, MPC83xx and MPC85xx processors.
+
+endif # APPWD

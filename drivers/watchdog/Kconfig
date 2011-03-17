@@ -1551,4 +1551,6 @@ config USBPCWATCHDOG
 
 	  Most people will say N.
 
+source "drivers/watchdog/appwd/Kconfig"
+
 endif # WATCHDOG
