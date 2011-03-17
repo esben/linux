@@ -47,6 +47,29 @@
 		reg = <0x00000000 0x08000000>;	// 128MB at 0
 	};
 
+	appwd {
+		compatible = "appwd-wdm", "simple-bus";
+		boot-timeout			= <20000>;
+		reboot-timeout			= <5000>;
+
+		watchdog0 {
+			compatible = "appwd-wdd";
+			init-timeout		= <60000>;
+			keepalive-timeout	= <5000>;
+			restart-timeout		= <10000>;
+			recover-timeout		= <10000>;
+			nowayout;
+		};
+
+		watchdog1 {
+			compatible = "appwd-wdd";
+			init-timeout		= <0>;
+			keepalive-timeout	= <5000>;
+			restart-timeout		= <10000>;
+			recover-timeout		= <10000>;
+		};
+	};
+
 	localbus@e0005000 {
 		#address-cells = <2>;
 		#size-cells = <1>;
@@ -104,9 +127,10 @@
 		bus-frequency = <0>;
 
 		wdt@200 {
-			device_type = "watchdog";
-			compatible = "mpc83xx_wdt";
+			compatible = "appwd-mpc8xxx";
 			reg = <0x200 0x100>;
+			timeout = <1000>;
+			heartbeat = <500>;
 		};
 
 		sleep-nexus {
