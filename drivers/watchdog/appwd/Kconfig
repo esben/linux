@@ -127,6 +127,12 @@ config APPWD_MAX_WDT
 	  multiple watchdog timers with Appliance Watchdog at the same
 	  time, you should set it to 1.
 
+config APPWD_WDT_DUMMY
+	bool "Dummy Watchdog Timer support"
+	select APPWD_WDM
+	help
+	  This adds support for a dummy watchdog timer stub.
+
 config APPWD_WDT_GPIO
 	bool "GPIO Appliance Watchdog Timer support"
 	select APPWD_WDM
