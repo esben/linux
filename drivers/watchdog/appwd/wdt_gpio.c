@@ -128,6 +128,51 @@ invalid_heartbeat:
 }
 
 
+int __init
+appwd_wdt_gpio_init(unsigned gpio, int heartbeat)
+{
+	int err;
+	struct wdt_gpio_data * data;
+
+	pr_debug("%s\n", __func__);
+
+	if (!gpio_is_valid(gpio)) {
+		printk(KERN_ERR "invalid gpio: %d\n", gpio);
+		return -EINVAL;
+	}
+
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	if (!data) {
+		printk(KERN_ERR "out of memory");
+		return -ENOMEM;
+	}
+
+	BUG_ON(heartbeat < 0);
+
+	data->gpio = gpio;
+	data->heartbeat = heartbeat;
+
+	udelay(5);
+	wdt_gpio_keepalive(data);
+
+	err = appwd_wdt_register(DRV_NAME, &wdt_gpio_ops, data->heartbeat,
+				 data);
+	if (err < 0) {
+		printk(KERN_ERR "failed to register wdt_gpio: %d\n", err);
+		goto appwd_wdt_register_failed;
+	}
+
+	pr_debug("%s: registered at gpio %u with heartbeat %d\n", __func__, gpio, heartbeat);
+
+	return 0;
+
+appwd_wdt_register_failed:
+
+	kfree(data);
+	return err;
+}
+
+
 static const struct of_device_id wdt_gpio_match[] = {
 	{
 		.compatible = "appwd-wdt-gpio",
