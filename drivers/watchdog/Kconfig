@@ -1553,4 +1553,11 @@ config USBPCWATCHDOG
 
 source "drivers/watchdog/appwd/Kconfig"
 
+config PREMATURE_WATCHDOG
+	bool "Premature watchdog keepalive"
+	default n
+	help
+	  Reset a watchdog timer before each kernel initcall. The platform
+	  must implement support for this.
+
 endif # WATCHDOG

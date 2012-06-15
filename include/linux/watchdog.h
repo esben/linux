@@ -145,4 +145,17 @@ static inline void watchdog_nmi_disable_all(void) {}
 static inline void watchdog_nmi_enable_all(void) {}
 #endif
 
+#ifdef CONFIG_PREMATURE_WATCHDOG
+typedef void (*premature_watchdog_reset)(void);
+typedef void (*premature_watchdog_exit)(void);
+extern int premature_watchdog_register(
+	premature_watchdog_reset, premature_watchdog_exit);
+extern void premature_watchdog_settle(void);
+extern void premature_watchdog_keepalive(void);
+#else
+#define premature_watchdog_register(r,e) do {} while (0)
+#define premature_watchdog_settle() do {} while (0)
+#define premature_watchdog_keepalive() do {} while (0)
+#endif /* CONFIG_PREMATURE_WATCHDOG */
+
 #endif  /* ifndef _LINUX_WATCHDOG_H */

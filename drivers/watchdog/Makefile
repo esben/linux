@@ -14,6 +14,9 @@ obj-$(CONFIG_WATCHDOG_CORE)	+= watchdog.o
 # that also fails then you can fall back to the software watchdog
 # to give you some cover.
 
+# Premature Watchdog Keepalive
+obj-$(CONFIG_PREMATURE_WATCHDOG) += premature.o
+
 # Appliance Watchdog
 obj-$(CONFIG_APPWD) += appwd/
 
