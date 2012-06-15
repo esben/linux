@@ -19,11 +19,13 @@
 
 #ifndef _APPWD_INT_H
 
+#include <linux/kthread.h>
+
 /* Common workqueue task used for wdm and wdd state-machines */
-extern struct workqueue_struct * appwd_workq;
+extern struct kthread_worker worker;
 
 /* Watchdog Monitor */
-void wdd_timeout(struct work_struct *);
+void wdd_timeout(struct kthread_work *);
 
 /* Watchdog Timer */
 struct wdt_operations {

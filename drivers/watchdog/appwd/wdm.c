@@ -18,15 +18,12 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/slab.h>
-#include <linux/err.h>
+#include <linux/module.h>
 #include <linux/init.h>
-#include <linux/of.h>
-#include <linux/of_platform.h>
-#include <linux/of_device.h>
+#include <linux/slab.h>
 #include <linux/reboot.h>
-#include <linux/workqueue.h>
-#include <linux/sched.h>
+#include <linux/platform_device.h>
+#include <linux/of.h>
 
 #ifdef CONFIG_MPC8xxx_RSTE
 #include <linux/mpc8xxx_rste.h>
@@ -54,7 +51,7 @@ struct wdm_private_wdt {
 	const char *			name;
 	struct wdt_operations		ops;
 	unsigned int			heartbeat_delay;
-	struct delayed_work		heartbeat;
+	struct delayed_kthread_work	heartbeat;
 	void *				data;
 };
 
@@ -71,11 +68,11 @@ struct wdm_private {
 	/* The state-machine is implemented on top of a workqueue,
 	 * with events implemented as work. */
 	enum wdm_state			state;
-	struct work_struct		boot_done_event;
-	struct delayed_work		boot_timeout_event;
-	struct delayed_work		reboot_timeout_event;
-	struct work_struct		wdd_timeout_event;
-	struct work_struct		system_down_event;
+	struct kthread_work		boot_done_event;
+	struct delayed_kthread_work	boot_timeout_event;
+	struct delayed_kthread_work	reboot_timeout_event;
+	struct kthread_work		wdd_timeout_event;
+	struct kthread_work		system_down_event;
 
 	unsigned int			num_wdd;
 	struct wdm_private_wdd		wdd[];
@@ -83,21 +80,23 @@ struct wdm_private {
 
 static struct wdm_private *		wdm = NULL;
 static struct wdm_private_wdt *		wdt = NULL;
-struct workqueue_struct *		appwd_workq = NULL;
-
+struct kthread_worker			worker;
+struct task_struct *			worker_task = NULL;
 
 static void
 queue_heartbeat(struct wdm_private_wdt * wdt)
 {
-	queue_delayed_work(appwd_workq, &wdt->heartbeat, wdt->heartbeat_delay);
+	queue_delayed_kthread_work(
+		&worker, &wdt->heartbeat, wdt->heartbeat_delay);
 }
 
 
 static void
-wdt_heartbeat(struct work_struct * work)
+wdt_heartbeat(struct kthread_work * work)
 {
 	struct wdm_private_wdt * wdt =
-		container_of(container_of(work, struct delayed_work, work),
+		container_of(container_of(work, struct delayed_kthread_work,
+					  work),
 			     struct wdm_private_wdt, heartbeat);
 
 	/* Early heartbeats where monitor is not initialized yet */
@@ -123,6 +122,38 @@ wdt_heartbeat(struct work_struct * work)
 	}
 }
 
+
+static int
+init_appwd_worker(void)
+{
+	struct sched_param param = { .sched_priority = MAX_RT_PRIO - 10 };
+
+	if (worker_task != NULL)
+		return 0;
+
+	/* Setup work queue */
+	init_kthread_worker(&worker);
+	worker_task = kthread_run(kthread_worker_fn, &worker, "appwd");
+	if (IS_ERR(worker_task)) {
+		pr_err("creating appwd worker failed: %ld\n",
+		       PTR_ERR(worker_task));
+		return PTR_ERR(worker_task);
+	}
+
+	/* Use FIFO scheduler as this is naturally realtime sensitive */
+	sched_setscheduler(worker_task, SCHED_FIFO, &param);
+
+	return 0;
+}
+
+static void
+stop_appwd_worker(void)
+{
+	if (worker_task == NULL)
+		return;
+
+	kthread_stop(worker_task);
+}
 
 int
 appwd_wdt_register(const char * name, const struct wdt_operations * ops,
@@ -153,15 +184,10 @@ appwd_wdt_register(const char * name, const struct wdt_operations * ops,
 		}
 	}
 
-	/* Setup work queue (if not already done) */
-	if (appwd_workq == NULL) {
-		appwd_workq = create_singlethread_workqueue(DRV_NAME);
-		if (IS_ERR(appwd_workq)) {
-			err = PTR_ERR(appwd_workq);
-			pr_err("create_workqueue failed: %d", err);
-			goto create_workq_failed;
-		}
-	}
+	/* Setup work queue */
+	err = init_appwd_worker();
+	if (err)
+		goto create_worker_failed;
 
 	for (i=0 ; i < CONFIG_APPWD_MAX_WDT ; i++) {
 		if (wdt[i].name != NULL)
@@ -171,7 +197,7 @@ appwd_wdt_register(const char * name, const struct wdt_operations * ops,
 		memcpy(&wdt[i].ops, ops, sizeof(ops));
 		wdt[i].heartbeat_delay = heartbeat_delay;
 		wdt[i].data = data;
-		INIT_DELAYED_WORK(&wdt[i].heartbeat, wdt_heartbeat);
+		init_delayed_kthread_work(&wdt[i].heartbeat, wdt_heartbeat);
 		break;
 	}
 
@@ -188,7 +214,7 @@ appwd_wdt_register(const char * name, const struct wdt_operations * ops,
 
 	return 0;
 
-create_workq_failed:
+create_worker_failed:
 	kfree(wdt);
 	wdt = NULL;
 
@@ -204,7 +230,7 @@ static int wdm_reboot_notice(struct notifier_block *this, unsigned long code,
 		return NOTIFY_DONE;
 
 	if (code==SYS_DOWN || code==SYS_HALT || code==SYS_POWER_OFF) {
-		queue_work(appwd_workq, &wdm->system_down_event);
+		queue_kthread_work(&worker, &wdm->system_down_event);
 	}
 
 	return NOTIFY_DONE;
@@ -223,18 +249,15 @@ appwd_init_post_hook(void)
 	if (wdm == NULL)
 		return;
 
-	cancel_delayed_work_sync(&wdm->boot_timeout_event);
+	cancel_delayed_kthread_work_sync(&wdm->boot_timeout_event);
 
-	queue_work(appwd_workq, &wdm->boot_done_event);
+	queue_kthread_work(&worker, &wdm->boot_done_event);
 }
 
 
 static void
-boot_done(struct work_struct * work)
+boot_done(struct kthread_work * work)
 {
-	struct sched_param param = { .sched_priority = MAX_RT_PRIO - 10 };
-	sched_setscheduler_nocheck(current, SCHED_FIFO, &param);
-
 	switch (wdm->state) {
 
 	case WDM_STATE_BOOT:
@@ -258,8 +281,8 @@ boot_done(struct work_struct * work)
 static void
 wdm_reboot(void)
 {
-	queue_delayed_work(appwd_workq, &wdm->reboot_timeout_event,
-			   wdm->reboot_timeout);
+	queue_delayed_kthread_work(&worker, &wdm->reboot_timeout_event,
+				   wdm->reboot_timeout);
 
 	/* Send SIGINT to init process, which is similar to what
 	 * CTRL-ALT-DEL keypress does */
@@ -268,7 +291,7 @@ wdm_reboot(void)
 
 
 static void
-boot_timeout(struct work_struct * work)
+boot_timeout(struct kthread_work * work)
 {
 	switch (wdm->state) {
 
@@ -292,7 +315,7 @@ boot_timeout(struct work_struct * work)
 
 
 void
-wdd_timeout(struct work_struct * work)
+wdd_timeout(struct kthread_work * work)
 {
 	switch (wdm->state) {
 
@@ -316,7 +339,7 @@ wdd_timeout(struct work_struct * work)
 
 
 static void
-reboot_timeout(struct work_struct * work)
+reboot_timeout(struct kthread_work * work)
 {
 	switch (wdm->state) {
 
@@ -338,7 +361,7 @@ reboot_timeout(struct work_struct * work)
 
 
 static void
-system_down(struct work_struct * work)
+system_down(struct kthread_work * work)
 {
 	pr_info("system_down\n");
 	switch (wdm->state) {
@@ -368,26 +391,18 @@ static int __devinit
 __wdm_init(struct wdm_private * tmp)
 {
 	int err, i;
-	int workq_created = 0;
 
-	/* Setup work queue (if not already done) */
-	if (appwd_workq == NULL) {
-		appwd_workq = create_singlethread_workqueue(DRV_NAME);
-		if (IS_ERR(appwd_workq))
-		{
-			err = PTR_ERR(appwd_workq);
-			pr_err("create_workqueue failed: %d", err);
-			goto create_workq_failed;
-		}
-		workq_created = 1;
-	}
+	/* Setup work queue */
+	err = init_appwd_worker();
+	if (err)
+		goto create_worker_failed;
 
 	/* Initialize event work structures */
-	INIT_WORK(&tmp->boot_done_event, boot_done);
-	INIT_WORK(&tmp->wdd_timeout_event, wdd_timeout);
-	INIT_WORK(&tmp->system_down_event, system_down);
-	INIT_DELAYED_WORK(&tmp->boot_timeout_event, boot_timeout);
-	INIT_DELAYED_WORK(&tmp->reboot_timeout_event, reboot_timeout);
+	init_kthread_work(&tmp->boot_done_event, boot_done);
+	init_kthread_work(&tmp->wdd_timeout_event, wdd_timeout);
+	init_kthread_work(&tmp->system_down_event, system_down);
+	init_delayed_kthread_work(&tmp->boot_timeout_event, boot_timeout);
+	init_delayed_kthread_work(&tmp->reboot_timeout_event, reboot_timeout);
 
 	/* The wdm_private struct is now initialized enough to handle
 	 * async events */
@@ -397,18 +412,18 @@ __wdm_init(struct wdm_private * tmp)
 		unsigned long delay = wdm->boot_timeout
 			- (jiffies - INITIAL_JIFFIES);
 		if (delay > 0) {
-			queue_delayed_work(appwd_workq,
-					   &wdm->boot_timeout_event,
-					   delay);
+			queue_delayed_kthread_work(
+				&worker, &wdm->boot_timeout_event, delay);
 		} else {
 			pr_alert("boot_timeout very early\n");
-			queue_work(appwd_workq, &wdm->boot_timeout_event.work);
+			queue_kthread_work(
+				&worker, &wdm->boot_timeout_event.work);
 		}
 	}
 
 	err = register_reboot_notifier(&wdm_reboot_notifier);
 	if (err) {
-		pr_err("failed to register reboot notifier: %d", err);
+		pr_err("failed to register reboot notifier: %d\n", err);
 		goto register_reboot_notifier_failed;
 	}
 
@@ -426,14 +441,8 @@ __wdm_init(struct wdm_private * tmp)
 
 	unregister_reboot_notifier(&wdm_reboot_notifier);
 register_reboot_notifier_failed:
-	// FIXME: consider what is the best way to error handle this...
-	// We don't want to risk a hanging system as a consequence of
-	// the error handling!
-	if (workq_created) {
-		destroy_workqueue(appwd_workq);
-		appwd_workq = NULL;
-	}
-create_workq_failed:
+	stop_appwd_worker();
+create_worker_failed:
 	kfree(tmp);
 
 	return err;
@@ -447,7 +456,7 @@ create_workq_failed:
  * of_platform_bus_probe() call in machine_device_initcall from board
  * file */
 static int __devinit
-wdm_probe(struct platform_device *pdev, const struct of_device_id *match)
+wdm_probe(struct platform_device *pdev)
 {
 	int i;
 	struct wdm_private * tmp;
@@ -465,7 +474,7 @@ wdm_probe(struct platform_device *pdev, const struct of_device_id *match)
 
 	tmp = kzalloc(sizeof(*tmp) + sizeof(tmp->wdd[0]) * i, GFP_KERNEL);
 	if (tmp == NULL) {
-		pr_warning("Out of memory");
+		pr_warning("Out of memory\n");
 		return -ENOMEM;
 	}
 
@@ -519,7 +528,7 @@ static const struct of_device_id wdm_match[] = {
 MODULE_DEVICE_TABLE(of, wdm_match);
 
 
-static struct of_platform_driver wdm_driver __devinitdata = {
+static struct platform_driver wdm_driver __devinitdata = {
 	.probe		= wdm_probe,
 	.driver = {
 		.name		= DRV_NAME,
@@ -532,10 +541,10 @@ static struct of_platform_driver wdm_driver __devinitdata = {
 static int __devinit wdm_register(void)
 {
 	int err;
-	pr_info("initializing appliance watchdog core\n");
-	err = of_register_platform_driver(&wdm_driver);
+	pr_info("Initializing appliance watchdog core\n");
+	err = platform_driver_register(&wdm_driver);
 	if (err < 0)
-		pr_err("of_register_platform_driver failed: %d\n", err);
+		pr_err("platform_driver_register failed: %d\n", err);
 	return err;
 }
 subsys_initcall(wdm_register);
@@ -553,7 +562,7 @@ wdm_init(void)
 	tmp = kzalloc(sizeof(*tmp) + sizeof(*tmp->wdd) * CONFIG_APPWD_NUM_WDD,
 		      GFP_KERNEL);
 	if (tmp == NULL) {
-		pr_warning("Out of memory");
+		pr_warning("Out of memory\n");
 		return -ENOMEM;
 	}
 

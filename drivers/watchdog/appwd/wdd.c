@@ -18,15 +18,13 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/slab.h>
+#include <linux/module.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <linux/spinlock.h>
-#include <linux/workqueue.h>
-#include <linux/miscdevice.h>
 #include <linux/device.h>
+#include <linux/miscdevice.h>
 #include <linux/fs.h>
-#include <linux/list.h>
-#include <linux/watchdog.h>
 #include <linux/uaccess.h>
 
 #include <linux/appwd.h>
@@ -88,17 +86,17 @@ struct wdd_private {
 	/* State-machine implemented on top of a workqueue, with
 	 * events implemented as works */
 	enum wdd_state			state;
-	struct work_struct		open_event;
-	struct work_struct		close_event;
-	struct work_struct		keepalive_event;
-	struct work_struct		magic_event;
-	struct delayed_work		init_timeout_event;
-	struct delayed_work		keepalive_timeout_event;
-	struct delayed_work		restart_timeout_event;
-	struct delayed_work		recover_timeout_event;
+	struct kthread_work		open_event;
+	struct kthread_work		close_event;
+	struct kthread_work		keepalive_event;
+	struct kthread_work		magic_event;
+	struct delayed_kthread_work	init_timeout_event;
+	struct delayed_kthread_work	keepalive_timeout_event;
+	struct delayed_kthread_work	restart_timeout_event;
+	struct delayed_kthread_work	recover_timeout_event;
 
 	/* Events to send to the Watchdog Monitor state-machine */
-	struct work_struct		app_fail_event;
+	struct kthread_work		app_fail_event;
 
 	/* The user-space watchdog device interface */
 	struct miscdevice		miscdev;
@@ -134,10 +132,11 @@ static struct file_operations wdd_fops = {
 };
 
 static void
-init_timeout_event(struct work_struct * work)
+init_timeout_event(struct kthread_work * work)
 {
 	struct wdd_private * wdd =
-		container_of(container_of(work, struct delayed_work, work),
+		container_of(container_of(work, struct delayed_kthread_work,
+					  work),
 			     struct wdd_private, init_timeout_event);
 
 	wdd_dbg(wdd, "init_timeout_event\n");
@@ -147,7 +146,7 @@ init_timeout_event(struct work_struct * work)
 		wdd_crit(wdd, "init timeout!\n");
 		wdd->state = WDD_STATE_DEAD;
 		/* Send app_init_timeout event to Watchdog Monitor */
-		queue_work(appwd_workq, &wdd->app_fail_event);
+		queue_kthread_work(&worker, &wdd->app_fail_event);
 		break;
 
 	case WDD_STATE_READY:
@@ -165,7 +164,7 @@ init_timeout_event(struct work_struct * work)
 
 
 static void
-open_event(struct work_struct * work)
+open_event(struct kthread_work * work)
 {
 	struct wdd_private * wdd =
 		container_of(work, struct wdd_private, open_event);
@@ -175,31 +174,35 @@ open_event(struct work_struct * work)
 
 	case WDD_STATE_INIT:
 		wdd->state = WDD_STATE_ACTIVE;
-		queue_delayed_work(appwd_workq, &wdd->keepalive_timeout_event,
-				   wdd->keepalive_timeout);
+		queue_delayed_kthread_work(&worker,
+					   &wdd->keepalive_timeout_event,
+					   wdd->keepalive_timeout);
 		break;
 
 	case WDD_STATE_READY:
 		wdd->state = WDD_STATE_ACTIVE;
-		cancel_delayed_work_sync(&wdd->keepalive_timeout_event);
-		queue_delayed_work(appwd_workq, &wdd->keepalive_timeout_event,
-				   wdd->keepalive_timeout);
+		cancel_delayed_kthread_work_sync(&wdd->keepalive_timeout_event);
+		queue_delayed_kthread_work(&worker,
+					   &wdd->keepalive_timeout_event,
+					   wdd->keepalive_timeout);
 		break;
 
 	case WDD_STATE_RESTART:
 		wdd_info(wdd, "restart success\n");
 		wdd->state = WDD_STATE_ACTIVE;
-		cancel_delayed_work_sync(&wdd->restart_timeout_event);
-		queue_delayed_work(appwd_workq, &wdd->keepalive_timeout_event,
-				   wdd->keepalive_timeout);
+		cancel_delayed_kthread_work_sync(&wdd->restart_timeout_event);
+		queue_delayed_kthread_work(&worker,
+					   &wdd->keepalive_timeout_event,
+					   wdd->keepalive_timeout);
 		break;
 
 	case WDD_STATE_RECOVER:
 		wdd_info(wdd, "recover success\n");
 		wdd->state = WDD_STATE_ACTIVE;
-		cancel_delayed_work_sync(&wdd->recover_timeout_event);
-		queue_delayed_work(appwd_workq, &wdd->keepalive_timeout_event,
-				   wdd->keepalive_timeout);
+		cancel_delayed_kthread_work_sync(&wdd->recover_timeout_event);
+		queue_delayed_kthread_work(&worker,
+					   &wdd->keepalive_timeout_event,
+					   wdd->keepalive_timeout);
 		break;
 
 	case WDD_STATE_ACTIVE:
@@ -214,7 +217,7 @@ open_event(struct work_struct * work)
 
 
 static void
-close_event(struct work_struct * work)
+close_event(struct kthread_work * work)
 {
 	struct wdd_private * wdd =
 		container_of(work, struct wdd_private, close_event);
@@ -226,15 +229,16 @@ close_event(struct work_struct * work)
 		wdd_warn(wdd, "closed: recover timeout in %u ms\n",
 			 wdd->recover_timeout * 1000 / HZ);
 		wdd->state = WDD_STATE_RECOVER;
-		cancel_delayed_work(&wdd->keepalive_timeout_event);
-		queue_delayed_work(appwd_workq, &wdd->recover_timeout_event,
-				   wdd->recover_timeout);
+		cancel_delayed_kthread_work_sync(&wdd->keepalive_timeout_event);
+		queue_delayed_kthread_work(&worker,
+					   &wdd->recover_timeout_event,
+					   wdd->recover_timeout);
 		break;
 
 	case WDD_STATE_MAGIC:
 		wdd_warn(wdd, "closed with magic\n");
 		wdd->state = WDD_STATE_READY;
-		cancel_delayed_work(&wdd->keepalive_timeout_event);
+		cancel_delayed_kthread_work_sync(&wdd->keepalive_timeout_event);
 		break;
 
 	case WDD_STATE_LATE:
@@ -257,7 +261,7 @@ close_event(struct work_struct * work)
 
 
 static void
-keepalive_event(struct work_struct * work)
+keepalive_event(struct kthread_work * work)
 {
 	struct wdd_private * wdd =
 		container_of(work, struct wdd_private, keepalive_event);
@@ -266,16 +270,18 @@ keepalive_event(struct work_struct * work)
 	switch (wdd->state) {
 
 	case WDD_STATE_ACTIVE:
-		cancel_delayed_work_sync(&wdd->keepalive_timeout_event);
-		queue_delayed_work(appwd_workq, &wdd->keepalive_timeout_event,
-				   wdd->keepalive_timeout);
+		cancel_delayed_kthread_work_sync(&wdd->keepalive_timeout_event);
+		queue_delayed_kthread_work(&worker,
+					   &wdd->keepalive_timeout_event,
+					   wdd->keepalive_timeout);
 		break;
 
 	case WDD_STATE_MAGIC:
 		wdd->state = WDD_STATE_ACTIVE;
-		cancel_delayed_work_sync(&wdd->keepalive_timeout_event);
-		queue_delayed_work(appwd_workq, &wdd->keepalive_timeout_event,
-				   wdd->keepalive_timeout);
+		cancel_delayed_kthread_work_sync(&wdd->keepalive_timeout_event);
+		queue_delayed_kthread_work(&worker,
+					   &wdd->keepalive_timeout_event,
+					   wdd->keepalive_timeout);
 		break;
 
 	case WDD_STATE_LATE:
@@ -297,7 +303,7 @@ keepalive_event(struct work_struct * work)
 
 
 static void
-magic_event(struct work_struct * work)
+magic_event(struct kthread_work * work)
 {
 	struct wdd_private * wdd =
 		container_of(work, struct wdd_private, magic_event);
@@ -307,15 +313,17 @@ magic_event(struct work_struct * work)
 
 	case WDD_STATE_ACTIVE:
 		wdd->state = WDD_STATE_MAGIC;
-		cancel_delayed_work_sync(&wdd->keepalive_timeout_event);
-		queue_delayed_work(appwd_workq, &wdd->keepalive_timeout_event,
-				   wdd->keepalive_timeout);
+		cancel_delayed_kthread_work_sync(&wdd->keepalive_timeout_event);
+		queue_delayed_kthread_work(&worker,
+					   &wdd->keepalive_timeout_event,
+					   wdd->keepalive_timeout);
 		break;
 
 	case WDD_STATE_MAGIC:
-		cancel_delayed_work_sync(&wdd->keepalive_timeout_event);
-		queue_delayed_work(appwd_workq, &wdd->keepalive_timeout_event,
-				   wdd->keepalive_timeout);
+		cancel_delayed_kthread_work_sync(&wdd->keepalive_timeout_event);
+		queue_delayed_kthread_work(&worker,
+					   &wdd->keepalive_timeout_event,
+					   wdd->keepalive_timeout);
 		break;
 
 	case WDD_STATE_LATE:
@@ -337,10 +345,11 @@ magic_event(struct work_struct * work)
 
 
 static void
-keepalive_timeout_event(struct work_struct * work)
+keepalive_timeout_event(struct kthread_work * work)
 {
 	struct wdd_private * wdd =
-		container_of(container_of(work, struct delayed_work, work),
+		container_of(container_of(work, struct delayed_kthread_work,
+					  work),
 			     struct wdd_private, keepalive_timeout_event);
 
 	wdd_dbg(wdd, "keepalive_timeout_event\n");
@@ -352,8 +361,9 @@ keepalive_timeout_event(struct work_struct * work)
 			 wdd->restart_timeout * 1000 / HZ);
 		wdd->state = WDD_STATE_LATE;
 		kill_pid(wdd->pid, SIGHUP, 1);
-		queue_delayed_work(appwd_workq, &wdd->restart_timeout_event,
-				   wdd->restart_timeout);
+		queue_delayed_kthread_work(&worker,
+					   &wdd->restart_timeout_event,
+					   wdd->restart_timeout);
 		break;
 
 	case WDD_STATE_INIT:
@@ -371,10 +381,11 @@ keepalive_timeout_event(struct work_struct * work)
 
 
 static void
-restart_timeout_event(struct work_struct * work)
+restart_timeout_event(struct kthread_work * work)
 {
 	struct wdd_private * wdd =
-		container_of(container_of(work, struct delayed_work, work),
+		container_of(container_of(work, struct delayed_kthread_work,
+					  work),
 			     struct wdd_private, restart_timeout_event);
 
 	wdd_dbg(wdd, "restart_timeout_event\n");
@@ -385,8 +396,9 @@ restart_timeout_event(struct work_struct * work)
 			 wdd->recover_timeout * 1000 / HZ);
 		wdd->state = WDD_STATE_DYING;
 		kill_pid(wdd->pid, SIGKILL, 1);
-		queue_delayed_work(appwd_workq, &wdd->recover_timeout_event,
-				   wdd->recover_timeout);
+		queue_delayed_kthread_work(&worker,
+					   &wdd->recover_timeout_event,
+					   wdd->recover_timeout);
 		break;
 
 	case WDD_STATE_RESTART:
@@ -394,8 +406,9 @@ restart_timeout_event(struct work_struct * work)
 			 wdd->recover_timeout * 1000 / HZ);
 		wdd->state = WDD_STATE_RECOVER;
 		kill_pid(wdd->pid, SIGKILL, 1);
-		queue_delayed_work(appwd_workq, &wdd->recover_timeout_event,
-				   wdd->recover_timeout);
+		queue_delayed_kthread_work(&worker,
+					   &wdd->recover_timeout_event,
+					   wdd->recover_timeout);
 		break;
 
 	case WDD_STATE_INIT:
@@ -413,10 +426,11 @@ restart_timeout_event(struct work_struct * work)
 
 
 static void
-recover_timeout_event(struct work_struct * work)
+recover_timeout_event(struct kthread_work * work)
 {
 	struct wdd_private * wdd =
-		container_of(container_of(work, struct delayed_work, work),
+		container_of(container_of(work, struct delayed_kthread_work,
+					  work),
 			     struct wdd_private, recover_timeout_event);
 
 	wdd_dbg(wdd, "recover_timeout_event\n");
@@ -426,7 +440,7 @@ recover_timeout_event(struct work_struct * work)
 	case WDD_STATE_RECOVER:
 		wdd_crit(wdd, "recover timeout!\n");
 		wdd->state = WDD_STATE_DEAD;
-		queue_work(appwd_workq, &wdd->app_fail_event);
+		queue_kthread_work(&worker, &wdd->app_fail_event);
 		break;
 
 	case WDD_STATE_INIT:
@@ -464,19 +478,19 @@ wdd_register(struct wdd_config *config)
 	wdd->restart_timeout = config->restart_timeout;
 	wdd->recover_timeout = config->recover_timeout;
 
-	INIT_WORK(&wdd->open_event, open_event);
-	INIT_WORK(&wdd->close_event, close_event);
-	INIT_WORK(&wdd->keepalive_event, keepalive_event);
-	INIT_WORK(&wdd->magic_event, magic_event);
-	INIT_DELAYED_WORK(&wdd->init_timeout_event,
-			  init_timeout_event);
-	INIT_DELAYED_WORK(&wdd->keepalive_timeout_event,
-			  keepalive_timeout_event);
-	INIT_DELAYED_WORK(&wdd->restart_timeout_event,
-			  restart_timeout_event);
-	INIT_DELAYED_WORK(&wdd->recover_timeout_event,
-			  recover_timeout_event);
-	INIT_WORK(&wdd->app_fail_event, wdd_timeout);
+	init_kthread_work(&wdd->open_event, open_event);
+	init_kthread_work(&wdd->close_event, close_event);
+	init_kthread_work(&wdd->keepalive_event, keepalive_event);
+	init_kthread_work(&wdd->magic_event, magic_event);
+	init_delayed_kthread_work(&wdd->init_timeout_event,
+				  init_timeout_event);
+	init_delayed_kthread_work(&wdd->keepalive_timeout_event,
+				  keepalive_timeout_event);
+	init_delayed_kthread_work(&wdd->restart_timeout_event,
+				  restart_timeout_event);
+	init_delayed_kthread_work(&wdd->recover_timeout_event,
+				  recover_timeout_event);
+	init_kthread_work(&wdd->app_fail_event, wdd_timeout);
 
 	wdd->miscdev.name = config->name;
 	wdd->miscdev.fops = &wdd_fops;
@@ -540,15 +554,15 @@ wdd_open(struct inode * inode, struct file * filp)
 
 	/* Cancel init_timeout_event if pending */
 	if (wdd->init_timeout)
-		cancel_delayed_work(&wdd->init_timeout_event);
+		cancel_delayed_kthread_work_sync(&wdd->init_timeout_event);
 
 	/* Send open_event to state-machine */
-	if (unlikely(queue_work(appwd_workq, &wdd->open_event) == 0)) {
+	if (unlikely(queue_kthread_work(&worker, &wdd->open_event) == 0)) {
 		/* And handle the unlikely race-conditions where
 		 * previous open_event(s) are not handled yet */
 		do {
-			flush_workqueue(appwd_workq);
-		} while (queue_work(appwd_workq, &wdd->open_event) == 0);
+			flush_kthread_worker(&worker);
+		} while (queue_kthread_work(&worker, &wdd->open_event) == 0);
 	}
 
 	wdd->pid = get_pid(task_pid(current));
@@ -569,12 +583,12 @@ wdd_close(struct inode * inode, struct file * filp)
 	spin_lock(&wdd->open_lock);
 
 	/* Send close_event to state-machine */
-	if (unlikely(queue_work(appwd_workq, &wdd->close_event) == 0)) {
+	if (unlikely(queue_kthread_work(&worker, &wdd->close_event) == 0)) {
 		/* And handle the unlikely race-conditions where
 		 * previous close_event(s) are not handled yet */
 		do {
-			flush_workqueue(appwd_workq);
-		} while (queue_work(appwd_workq, &wdd->close_event) == 0);
+			flush_kthread_worker(&worker);
+		} while (queue_kthread_work(&worker, &wdd->close_event) == 0);
 	}
 
 	wdd->is_open = 0;
@@ -590,9 +604,9 @@ wdd_keepalive(struct wdd_private * wdd, int magic)
 	wdd->status_flags |= WDIOF_KEEPALIVEPING;
 
 	if (magic && !wdd->config->nowayout)
-		queue_work(appwd_workq, &wdd->magic_event);
+		queue_kthread_work(&worker, &wdd->magic_event);
 	else
-		queue_work(appwd_workq, &wdd->keepalive_event);
+		queue_kthread_work(&worker, &wdd->keepalive_event);
 }
 
 
@@ -755,9 +769,9 @@ wdd_init_start(void)
 		if (wdd->init_timeout) {
 			wdd_info(wdd, "init timeout in %u ms\n",
 				 wdd->init_timeout * 1000 / HZ);
-			queue_delayed_work(appwd_workq,
-					   &wdd->init_timeout_event,
-					   wdd->init_timeout);
+			queue_delayed_kthread_work(&worker,
+						   &wdd->init_timeout_event,
+						   wdd->init_timeout);
 		}
 	}
 }
