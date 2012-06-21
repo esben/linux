@@ -99,6 +99,15 @@ wdt_heartbeat(struct kthread_work * work)
 					  work),
 			     struct wdm_private_wdt, heartbeat);
 
+#ifdef CONFIG_PREMATURE_WATCHDOG
+	static int premature_active = 1;
+	/* Stop premature watchdog keepalive (if enabled) */
+	if (premature_active) {
+		premature_watchdog_settle();
+		premature_active = 0;
+	}
+#endif
+
 	/* Early heartbeats where monitor is not initialized yet */
 	if (wdm == NULL) {
 		wdt->ops.keepalive(wdt->data);
@@ -166,11 +175,6 @@ appwd_wdt_register(const char * name, const struct wdt_operations * ops,
 		pr_warning("invalid arguments\n");
 		return -EINVAL;
 	}
-
-#ifdef CONFIG_PREMATURE_WATCHDOG
-	/* Stop premature watchdog keepalive (if enabled) */
-	premature_watchdog_settle();
-#endif
 
 	/* Let's pet the dog in a hurry */
 	ops->keepalive(data);
