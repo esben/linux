@@ -15,6 +15,10 @@
 #include "inffast.h"
 #include "infutil.h"
 
+#ifndef decompress_keepalive
+#define decompress_keepalive() do {} while (0)
+#endif
+
 int zlib_inflate_workspacesize(void)
 {
     return sizeof(struct inflate_workspace);
@@ -483,6 +487,7 @@ int zlib_inflate(z_streamp strm, int flush)
             state->mode = CODELENS;
         case CODELENS:
             while (state->have < state->nlen + state->ndist) {
+                decompress_keepalive();
                 for (;;) {
                     this = state->lencode[BITS(state->lenbits)];
                     if ((unsigned)(this.bits) <= bits) break;
@@ -554,6 +559,7 @@ int zlib_inflate(z_streamp strm, int flush)
                 break;
             }
             state->mode = LEN;
+            decompress_keepalive();
         case LEN:
             if (have >= 6 && left >= 258) {
                 RESTORE();
