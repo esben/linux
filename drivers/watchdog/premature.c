@@ -34,7 +34,7 @@ premature_watchdog_register(premature_watchdog_reset _reset_func,
 	}
 	reset_func = _reset_func;
 	exit_func = _exit_func;
-	(*reset_func)();
+	premature_watchdog_keepalive();
 	printk(KERN_INFO "Premature watchdog keepalive started\n");
 	return 0;
 }
@@ -42,9 +42,11 @@ premature_watchdog_register(premature_watchdog_reset _reset_func,
 void
 premature_watchdog_settle(void)
 {
-	(*reset_func)();
+	if (reset_func)
+		(*reset_func)();
 	printk(KERN_INFO "Premature watchdog keepalive stopped\n");
-	(*exit_func)();
+	if (exit_func != NULL)
+		(*exit_func)();
 	reset_func = NULL;
 	exit_func = NULL;
 }
