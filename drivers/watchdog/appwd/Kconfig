@@ -135,9 +135,14 @@ config APPWD_WDT_DUMMY
 
 config APPWD_WDT_GPIO
 	bool "GPIO Appliance Watchdog Timer support"
+	depends on GPIOLIB
 	select APPWD_WDM
 	help
 	  This adds support for GPIO based watchdog timers.
+
+config APPWD_WDT_GPIO_PREMATURE
+	def_bool y
+	depends on APPWD_WDT_GPIO && PREMATURE_WATCHDOG
 
 config APPWD_WDT_MPC8xxx
 	bool "MPC8xx/MPC83xx/MPC85xx Appliance Watchdog Timer support"
