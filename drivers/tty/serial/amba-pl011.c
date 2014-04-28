@@ -52,6 +52,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/scatterlist.h>
 #include <linux/delay.h>
+#include <linux/watchdog.h>
 #include <linux/types.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
@@ -2030,6 +2031,8 @@ pl011_console_write(struct console *co, const char *s, unsigned int count)
 	if (locked)
 		spin_unlock(&uap->port.lock);
 	local_irq_restore(flags);
+
+	premature_watchdog_keepalive();
 
 	clk_disable(uap->clk);
 }
