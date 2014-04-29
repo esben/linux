@@ -467,7 +467,7 @@ wdm_probe(struct platform_device *pdev)
 	int i;
 	struct wdm_private * tmp;
 	struct device_node *wdm_np = pdev->dev.of_node, *wdd_np;
-	const u32 *val;
+	u32 val;
 	/* FIXME: default values for wdd parameters
 	unsigned int init_timeout, keepalive_timeout, recover_timeout;
 	int nowayout;
@@ -487,33 +487,27 @@ wdm_probe(struct platform_device *pdev)
 	tmp->num_wdd = i;
 
 	/* Get configuration values from fdt properties */
-	val = of_get_property(wdm_np, "boot-timeout", NULL);
-	if (val)
-		tmp->boot_timeout = *val * HZ / 1000;
+	if (!of_property_read_u32(wdm_np, "boot-timeout", &val))
+		tmp->boot_timeout = val * HZ / 1000;
 
-	val = of_get_property(wdm_np, "reboot-timeout", NULL);
-	if (val)
-		tmp->reboot_timeout = *val * HZ / 1000;
+	if (!of_property_read_u32(wdm_np, "reboot-timeout", &val))
+		tmp->reboot_timeout = val * HZ / 1000;
 
 	/* Go through all fdt configured watchdog devices */
 	i = 0;
 	for_each_child_of_node(wdm_np, wdd_np) {
 
-		val = of_get_property(wdd_np, "init-timeout", NULL);
-		if (val)
-			tmp->wdd[i].config.init_timeout = *val * HZ / 1000;
+		if (!of_property_read_u32(wdd_np, "init-timeout", &val))
+			tmp->wdd[i].config.init_timeout = val * HZ / 1000;
 
-		val = of_get_property(wdd_np, "keepalive-timeout", NULL);
-		if (val)
-			tmp->wdd[i].config.keepalive_timeout = *val * HZ / 1000;
+		if (!of_property_read_u32(wdd_np, "keepalive-timeout", &val))
+			tmp->wdd[i].config.keepalive_timeout = val * HZ / 1000;
 
-		val = of_get_property(wdd_np, "restart-timeout", NULL);
-		if (val)
-			tmp->wdd[i].config.restart_timeout = *val * HZ / 1000;
+		if (!of_property_read_u32(wdd_np, "restart-timeout", &val))
+			tmp->wdd[i].config.restart_timeout = val * HZ / 1000;
 
-		val = of_get_property(wdd_np, "recover-timeout", NULL);
-		if (val)
-			tmp->wdd[i].config.recover_timeout = *val * HZ / 1000;
+		if (!of_property_read_u32(wdd_np, "recover-timeout", &val))
+			tmp->wdd[i].config.recover_timeout = val * HZ / 1000;
 
 		if (of_find_property(wdd_np, "nowayout", NULL))
 			tmp->wdd[i].config.nowayout = 1;

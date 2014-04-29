@@ -37,7 +37,6 @@ struct wdt_gpio_data {
 	int heartbeat;
 };
 
-
 static void
 wdt_gpio_keepalive(void * _data)
 {
@@ -57,7 +56,7 @@ wdt_gpio_probe(struct platform_device *pdev)
 	int err;
 	struct wdt_gpio_data * data;
 	enum of_gpio_flags flags;
-	const u32 * val;
+	u32 val;
 
 	pr_debug("%s\n", __func__);
 
@@ -67,13 +66,18 @@ wdt_gpio_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 	data->gpio = of_get_gpio_flags(np, 0, &flags);
+	dev_dbg(&pdev->dev, "gpio=%d\n", data->gpio);
 
-	val = of_get_property(np, "heartbeat", NULL);
-	if (val) {
-		dev_info(&pdev->dev, "heartbeat=%d\n", *val);
-		data->heartbeat = *val * HZ / 1000;
+	if (of_property_read_u32(np, "heartbeat", &val)) {
+		dev_err(&pdev->dev, "heartbeat not specified\n");
+		err = -EINVAL;
+		goto invalid_heartbeat;
+	} else {
+		dev_dbg(&pdev->dev, "heartbeat=%d\n", val);
+		data->heartbeat = val * HZ / 1000;
 		if (data->heartbeat < 0) {
-			printk(KERN_ERR "heartbeat delay must be at least 1 jiffy\n");
+			dev_err(&pdev->dev,
+				"heartbeat delay must be at least 1 jiffy\n");
 			err = -EINVAL;
 			goto invalid_heartbeat;
 		}
