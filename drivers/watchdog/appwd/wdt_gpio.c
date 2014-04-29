@@ -35,14 +35,21 @@ struct wdt_gpio_data {
 	unsigned gpio;
 	int level;
 	int heartbeat;
+	unsigned pulse_width_ns;
 };
 
 static void
 wdt_gpio_keepalive(void * _data)
 {
 	struct wdt_gpio_data * data = _data;
-	data->level = data->level ? 0 : 1;
-	gpio_set_value_cansleep(data->gpio, data->level);
+	if (data->pulse_width_ns) {
+		gpio_set_value_cansleep(data->gpio, data->level);
+		ndelay(data->pulse_width_ns);
+		gpio_set_value_cansleep(data->gpio, !data->level);
+	} else {
+		data->level = data->level ? 0 : 1;
+		gpio_set_value_cansleep(data->gpio, data->level);
+	}
 }
 
 static struct wdt_operations wdt_gpio_ops = {
@@ -81,6 +88,12 @@ wdt_gpio_probe(struct platform_device *pdev)
 			err = -EINVAL;
 			goto invalid_heartbeat;
 		}
+	}
+
+	if (!of_property_read_u32(np, "pulse-width-ns", &val)) {
+		dev_dbg(&pdev->dev, "pulse-width-ns=%d\n", val);
+		data->pulse_width_ns = val;
+		data->level = (flags & OF_GPIO_ACTIVE_LOW) ? 0 : 1;
 	}
 
 	if (!gpio_is_valid(data->gpio)) {
