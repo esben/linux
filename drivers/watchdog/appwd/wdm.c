@@ -24,6 +24,8 @@
 #include <linux/reboot.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
+#include <linux/sched.h>
+#include <linux/sched/rt.h>
 
 #ifdef CONFIG_MPC8xxx_RSTE
 #include <linux/mpc8xxx_rste.h>
