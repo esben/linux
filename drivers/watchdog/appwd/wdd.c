@@ -456,7 +456,7 @@ recover_timeout_event(struct kthread_work * work)
 	}
 }
 
-int __devinit
+int
 wdd_register(struct wdd_config *config)
 {
 	int err;

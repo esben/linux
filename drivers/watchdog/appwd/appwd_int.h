@@ -41,8 +41,8 @@ struct wdd_config {
 	unsigned int			recover_timeout;
 	int				nowayout;
 };
-int __devinit wdd_register(struct wdd_config *);
-void __devinit wdd_deregister(void *);
+int wdd_register(struct wdd_config *);
+void wdd_deregister(void *);
 void wdd_init_start(void);
 int appwd_wdt_register(const char *, const struct wdt_operations *,
 		       unsigned int, void *);

@@ -80,7 +80,7 @@ static struct wdt_operations wdt_mpc8xxx_ops = {
 };
 
 
-static int __devinit
+static int
 wdt_mpc8xxx_probe(struct platform_device *pdev,
 		  const struct of_device_id *match)
 {

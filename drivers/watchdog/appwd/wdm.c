@@ -391,7 +391,7 @@ system_down(struct kthread_work * work)
 }
 
 
-static int __devinit
+static int
 __wdm_init(struct wdm_private * tmp)
 {
 	int err, i;
@@ -459,7 +459,7 @@ create_worker_failed:
 /* This will typically be indirectly called as device_initcall from the
  * of_platform_bus_probe() call in machine_device_initcall from board
  * file */
-static int __devinit
+static int
 wdm_probe(struct platform_device *pdev)
 {
 	int i;
@@ -532,7 +532,7 @@ static const struct of_device_id wdm_match[] = {
 MODULE_DEVICE_TABLE(of, wdm_match);
 
 
-static struct platform_driver wdm_driver __devinitdata = {
+static struct platform_driver wdm_driver = {
 	.probe		= wdm_probe,
 	.driver = {
 		.name		= DRV_NAME,
@@ -542,7 +542,7 @@ static struct platform_driver wdm_driver __devinitdata = {
 };
 
 
-static int __devinit wdm_register(void)
+static int wdm_register(void)
 {
 	int err;
 	pr_info("Initializing appliance watchdog core\n");
