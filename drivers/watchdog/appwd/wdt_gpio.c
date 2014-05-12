@@ -50,7 +50,7 @@ static struct wdt_operations wdt_gpio_ops = {
 	.keepalive	= wdt_gpio_keepalive,
 };
 
-static int __init
+static int
 wdt_gpio_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
@@ -182,7 +182,7 @@ static const struct of_device_id wdt_gpio_match[] = {
 MODULE_DEVICE_TABLE(of, wdt_gpio_match);
 
 
-static struct platform_driver wdt_gpio_driver __initdata = {
+static struct platform_driver wdt_gpio_driver = {
 	.probe		= wdt_gpio_probe,
 	.driver = {
 		.name		= DRV_NAME,
