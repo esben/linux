@@ -19,9 +19,12 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/init.h>
+#include <linux/platform_device.h>
 #include <linux/of_platform.h>
+#include <linux/of.h>
 #include <linux/io.h>
 #include <sysdev/fsl_soc.h>
 
@@ -80,22 +83,28 @@ static struct wdt_operations wdt_mpc8xxx_ops = {
 };
 
 
+static const struct of_device_id wdt_mpc8xxx_match[];
+
 static int
-wdt_mpc8xxx_probe(struct platform_device *pdev,
-		  const struct of_device_id *match)
+wdt_mpc8xxx_probe(struct platform_device *pdev)
 {
 
 	struct device_node *np = pdev->dev.of_node;
-	struct mpc8xxx_wdt_type *wdt_type = match->data;
 	struct wdt_mpc8xxx_data * data;
+	const struct of_device_id *match;
+	const struct mpc8xxx_wdt_type *wdt_type;
 	u32 freq = fsl_get_sys_freq();
 	const u32 *val;
 	int err;
 	u32 tmp = SWCRR_SWEN;
 
+	match = of_match_device(wdt_mpc8xxx_match, &pdev->dev);
+	if (!match)
+		return -EINVAL;
+	wdt_type = match->data;
+
 	if (!freq || freq == -1)
 		return -EINVAL;
-
 
 	wd_base = of_iomap(np, 0);
 	if (!wd_base)
@@ -174,14 +183,13 @@ static const struct of_device_id wdt_mpc8xxx_match[] = {
 		.data = &(struct mpc8xxx_wdt_type) {
 			.prescaler = 0x10000,
 		},
-
 	},
 	{},
 };
 MODULE_DEVICE_TABLE(of, wdt_mpc8xxx_match);
 
 
-static struct of_platform_driver wdt_mpc8xxx_driver = {
+static struct platform_driver wdt_mpc8xxx_driver = {
 	.probe		= wdt_mpc8xxx_probe,
 	.driver = {
 		.name		= DRV_NAME,
@@ -193,7 +201,7 @@ static struct of_platform_driver wdt_mpc8xxx_driver = {
 static int __init wdt_mpc8xxx_init(void)
 {
 	pr_info("initializing appwd_mpc8xxx driver\n");
-	return of_register_platform_driver(&wdt_mpc8xxx_driver);
+	return platform_driver_register(&wdt_mpc8xxx_driver);
 }
 device_initcall(wdt_mpc8xxx_init);
 
