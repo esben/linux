@@ -1,5 +1,5 @@
-#ifndef _LINUX_APPWD_H
-#define _LINUX_APPWD_H
+#ifndef _UAPI_LINUX_APPWD_H
+#define _UAPI_LINUX_APPWD_H
 
 #include <linux/watchdog.h>
 
@@ -16,20 +16,4 @@
 #define	WDIOC_SETRECOVERTIMEOUTMSEC	_IOWR(WATCHDOG_IOCTL_BASE, 24, int)
 #define	WDIOC_GETRECOVERTIMEOUTMSEC	_IOR(WATCHDOG_IOCTL_BASE, 25, int)
 
-#ifdef __KERNEL__
-
-#ifdef CONFIG_APPWD
-extern void appwd_init_post_hook(void);
-#else
-#define appwd_init_post_hook() do {} while (0)
-#endif /* CONFIG_APPWD */
-
-#ifdef CONFIG_APPWD_WDT_GPIO
-extern int __init appwd_wdt_gpio_init(unsigned, int);
-#else
-#define appwd_wdt_gpio_init(a, b) do {} while (0)
-#endif /* CONFIG_APPWD_WDT_GPIO */
-
-#endif /* __KERNEL__ */
-
-#endif  /* _LINUX_APPWD_H */
+#endif  /* _UAPI_LINUX_APPWD_H */
