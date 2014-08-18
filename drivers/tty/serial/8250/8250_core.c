@@ -42,6 +42,11 @@
 #include <linux/sunserialcore.h>
 #endif
 
+#ifdef CONFIG_PREMATURE_WATCHDOG
+#include <linux/watchdog.h>
+#include <linux/appwd.h>
+#endif
+
 #include <asm/io.h>
 #include <asm/irq.h>
 
@@ -57,6 +62,10 @@ static unsigned int share_irqs = SERIAL8250_SHARE_IRQS;
 static unsigned int nr_uarts = CONFIG_SERIAL_8250_RUNTIME_UARTS;
 
 static struct uart_driver serial8250_reg;
+
+#ifdef CONFIG_PREMATURE_WATCHDOG
+static unsigned int local_count_for_wd_keepalive = 10;
+#endif
 
 static int serial_index(struct uart_port *port)
 {
@@ -3401,6 +3410,20 @@ static void serial8250_console_write(struct uart_8250_port *up, const char *s,
 	}
 
 	uart_console_write(port, s, count, serial8250_console_putchar);
+
+#ifdef CONFIG_PREMATURE_WATCHDOG
+	/*
+	 *	Make sure the watchdog is kept alive while we flush
+	 *	the content to console after intializing. It's only
+	 *	kept alive untill the wdt is ready (when the state changes).
+	 */
+	if (get_appwd_state() == 0 ) {
+		if (local_count_for_wd_keepalive-- == 0) {
+			premature_watchdog_keepalive();
+			local_count_for_wd_keepalive=10;
+		}
+	}
+#endif
 
 	/*
 	 *	Finally, wait for transmitter to become empty

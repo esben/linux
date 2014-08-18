@@ -133,6 +133,10 @@ wdt_heartbeat(struct kthread_work * work)
 	}
 }
 
+int get_appwd_state(void)
+{
+	return wdm->state;
+}
 
 static int
 init_appwd_worker(void)
