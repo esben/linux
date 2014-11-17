@@ -1,4 +1,3 @@
-
 #ifndef _LINUX_APPWD_H
 #define _LINUX_APPWD_H
 
