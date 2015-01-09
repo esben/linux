@@ -68,6 +68,7 @@
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/vmalloc.h>
+#include <linux/watchdog.h>
 #include <linux/export.h>
 #include <linux/string.h>
 
@@ -505,6 +506,7 @@ static int create_bbt(struct mtd_info *mtd, uint8_t *buf,
 		}
 
 		from += (1 << this->bbt_erase_shift);
+		premature_watchdog_keepalive();
 	}
 	return 0;
 }
