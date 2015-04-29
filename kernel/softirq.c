@@ -59,7 +59,7 @@ static struct softirq_action softirq_vec[NR_SOFTIRQS] __cacheline_aligned_in_smp
 
 DEFINE_PER_CPU(struct task_struct * [NR_SOFTIRQ_THREADS], ksoftirqd);
 
-static unsigned int __read_mostly threadsirqs;
+static unsigned int __read_mostly threadsirqs = 1;
 
 static struct task_struct *__this_cpu_ksoftirqd(int nr)
 {
