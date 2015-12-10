@@ -204,7 +204,7 @@ appwd_wdt_register(const char * name, const struct wdt_operations * ops,
 			continue;
 
 		wdt[i].name = name;
-		memcpy(&wdt[i].ops, ops, sizeof(ops));
+		memcpy(&wdt[i].ops, ops, sizeof(*ops));
 		wdt[i].heartbeat_delay = heartbeat_delay;
 		wdt[i].data = data;
 		init_delayed_kthread_work(&wdt[i].heartbeat, wdt_heartbeat);
