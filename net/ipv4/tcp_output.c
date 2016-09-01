@@ -872,7 +872,7 @@ void tcp_wfree(struct sk_buff *skb)
 	 * - chance for incoming ACK (processed by another cpu maybe)
 	 *   to migrate this flow (skb->ooo_okay will be eventually set)
 	 */
-	if (wmem >= SKB_TRUESIZE(1) && this_cpu_ksoftirqd() == current)
+	if (wmem >= SKB_TRUESIZE(1) && task_is_softirqd(current))
 		goto out;
 
 	if (test_and_clear_bit(TSQ_THROTTLED, &tp->tsq_flags) &&
