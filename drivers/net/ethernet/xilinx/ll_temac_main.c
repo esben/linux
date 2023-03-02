@@ -907,6 +907,15 @@ temac_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 		netif_wake_queue(ndev);
 	}
 
+	skb_dma_addr = dma_map_single(ndev->dev.parent, skb->data,
+				      skb_headlen(skb), DMA_TO_DEVICE);
+	if (WARN_ON_ONCE(dma_mapping_error(ndev->dev.parent, skb_dma_addr))) {
+		dev_kfree_skb_any(skb);
+		ndev->stats.tx_dropped++;
+		spin_unlock_irqrestore(&lp->reset_lock, flags);
+		return NETDEV_TX_OK;
+	}
+
 	cur_p->app0 = 0;
 	if (skb->ip_summed == CHECKSUM_PARTIAL) {
 		unsigned int csum_start_off = skb_checksum_start_offset(skb);
@@ -919,15 +928,7 @@ temac_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 	}
 
 	cur_p->app0 |= cpu_to_be32(STS_CTRL_APP0_SOP);
-	skb_dma_addr = dma_map_single(ndev->dev.parent, skb->data,
-				      skb_headlen(skb), DMA_TO_DEVICE);
 	cur_p->len = cpu_to_be32(skb_headlen(skb));
-	if (WARN_ON_ONCE(dma_mapping_error(ndev->dev.parent, skb_dma_addr))) {
-		dev_kfree_skb_any(skb);
-		ndev->stats.tx_dropped++;
-		spin_unlock_irqrestore(&lp->reset_lock, flags);
-		return NETDEV_TX_OK;
-	}
 	cur_p->phys = cpu_to_be32(skb_dma_addr);
 
 	for (ii = 0; ii < num_frag; ii++) {
