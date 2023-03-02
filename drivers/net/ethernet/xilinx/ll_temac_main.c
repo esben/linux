@@ -950,6 +950,9 @@ temac_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 						 be32_to_cpu(cur_p->phys),
 						 skb_frag_size(frag),
 						 DMA_TO_DEVICE);
+				cur_p->len = 0;
+				cur_p->phys = 0;
+				cur_p->app0 = 0;
 				if (--lp->tx_bd_tail < 0)
 					lp->tx_bd_tail = lp->tx_bd_num - 1;
 				cur_p = &lp->tx_bd_v[lp->tx_bd_tail];
