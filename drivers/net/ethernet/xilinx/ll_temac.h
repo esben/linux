@@ -367,6 +367,7 @@ struct temac_local {
 
 	struct sk_buff **rx_skb;
 	spinlock_t rx_lock;
+	spinlock_t reset_lock; /* serialize xmit and tx_timeout execution */
 	/* For synchronization of indirect register access.  Must be
 	 * shared mutex between interfaces in same TEMAC block.
 	 */

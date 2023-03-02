@@ -513,6 +513,32 @@ static void temac_set_multicast_list(struct net_device *ndev)
 		dev_info(&ndev->dev, "Promiscuous mode disabled.\n");
 }
 
+static void temac_tx_timeout(struct net_device *dev, unsigned int txqueue)
+{
+	struct temac_local *lp = netdev_priv(dev);
+	unsigned long flags;
+
+	netdev_err(dev, "Exceeded transmit timeout of %lu ms\n",
+		   TX_TIMEOUT * 1000UL / HZ);
+
+	dev->stats.tx_errors++;
+
+	/* Reset the device */
+	spin_lock_irqsave(&lp->reset_lock, flags);
+
+	/* Shouldn't really be necessary, but shouldn't hurt */
+	//netif_stop_queue(dev);
+
+	temac_stop(dev);
+
+	/* To exclude tx timeout */
+	netif_trans_update(dev); /* prevent tx timeout */
+
+	/* We're all ready to go. Start the queue */
+	netif_wake_queue(dev);
+	spin_unlock_irqrestore(&lp->reset_lock, flags);
+}
+
 static struct temac_option {
 	int flg;
 	u32 opt;
@@ -853,14 +879,19 @@ temac_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 	int ii;
 	unsigned long num_frag;
 	skb_frag_t *frag;
+        unsigned long flags;
 
 	num_frag = skb_shinfo(skb)->nr_frags;
 	frag = &skb_shinfo(skb)->frags[0];
 	cur_p = &lp->tx_bd_v[lp->tx_bd_tail];
 
+	spin_lock_irqsave(&lp->reset_lock, flags);
+
 	if (temac_check_tx_bd_space(lp, num_frag + 1)) {
-		if (netif_queue_stopped(ndev))
+		if (netif_queue_stopped(ndev)) {
+			spin_unlock_irqrestore(&lp->reset_lock, flags);
 			return NETDEV_TX_BUSY;
+		}
 
 		netif_stop_queue(ndev);
 
@@ -868,8 +899,10 @@ temac_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 		smp_mb();
 
 		/* Space might have just been freed - check again */
-		if (temac_check_tx_bd_space(lp, num_frag + 1))
+		if (temac_check_tx_bd_space(lp, num_frag + 1)) {
+			spin_unlock_irqrestore(&lp->reset_lock, flags);
 			return NETDEV_TX_BUSY;
+		}
 
 		netif_wake_queue(ndev);
 	}
@@ -892,6 +925,7 @@ temac_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 	if (WARN_ON_ONCE(dma_mapping_error(ndev->dev.parent, skb_dma_addr))) {
 		dev_kfree_skb_any(skb);
 		ndev->stats.tx_dropped++;
+		spin_unlock_irqrestore(&lp->reset_lock, flags);
 		return NETDEV_TX_OK;
 	}
 	cur_p->phys = cpu_to_be32(skb_dma_addr);
@@ -924,6 +958,7 @@ temac_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 					 skb_headlen(skb), DMA_TO_DEVICE);
 			dev_kfree_skb_any(skb);
 			ndev->stats.tx_dropped++;
+			spin_unlock_irqrestore(&lp->reset_lock, flags);
 			return NETDEV_TX_OK;
 		}
 		cur_p->phys = cpu_to_be32(skb_dma_addr);
@@ -942,6 +977,8 @@ temac_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 	lp->tx_bd_tail++;
 	if (lp->tx_bd_tail >= lp->tx_bd_num)
 		lp->tx_bd_tail = 0;
+
+	spin_unlock_irqrestore(&lp->reset_lock, flags);
 
 	skb_tx_timestamp(skb);
 
@@ -1243,6 +1280,7 @@ static const struct net_device_ops temac_netdev_ops = {
 	.ndo_set_rx_mode = temac_set_multicast_list,
 	.ndo_set_mac_address = temac_set_mac_address,
 	.ndo_validate_addr = eth_validate_addr,
+	.ndo_tx_timeout = temac_tx_timeout,
 	.ndo_eth_ioctl = phy_do_ioctl_running,
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_poll_controller = temac_poll_controller,
@@ -1403,6 +1441,7 @@ static int temac_probe(struct platform_device *pdev)
 	ndev->features = NETIF_F_SG;
 	ndev->netdev_ops = &temac_netdev_ops;
 	ndev->ethtool_ops = &temac_ethtool_ops;
+	ndev->watchdog_timeo = TX_TIMEOUT;
 #if 0
 	ndev->features |= NETIF_F_IP_CSUM; /* Can checksum TCP/UDP over IPv4. */
 	ndev->features |= NETIF_F_HW_CSUM; /* Can checksum all the packets. */
@@ -1425,6 +1464,7 @@ static int temac_probe(struct platform_device *pdev)
 	lp->rx_bd_num = RX_BD_NUM_DEFAULT;
 	lp->tx_bd_num = TX_BD_NUM_DEFAULT;
 	spin_lock_init(&lp->rx_lock);
+	spin_lock_init(&lp->reset_lock);
 	INIT_DELAYED_WORK(&lp->restart_work, ll_temac_restart_work_func);
 
 	/* Setup mutex for synchronization of indirect register access */
