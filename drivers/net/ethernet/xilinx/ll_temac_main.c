@@ -916,7 +916,7 @@ temac_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 		return NETDEV_TX_OK;
 	}
 
-	cur_p->app0 = 0;
+	cur_p->app0 = cpu_to_be32(STS_CTRL_APP0_INUSE);
 	if (skb->ip_summed == CHECKSUM_PARTIAL) {
 		unsigned int csum_start_off = skb_checksum_start_offset(skb);
 		unsigned int csum_index_off = csum_start_off + skb->csum_offset;
@@ -925,6 +925,8 @@ temac_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 		cur_p->app1 = cpu_to_be32((csum_start_off << 16)
 					  | csum_index_off);
 		cur_p->app2 = 0;  /* initial checksum seed */
+                // TODO: are we sure we don't need to care about TX checksum
+                // control when additional fragments are supplied?
 	}
 
 	cur_p->app0 |= cpu_to_be32(STS_CTRL_APP0_SOP);
@@ -967,7 +969,7 @@ temac_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 		}
 		cur_p->phys = cpu_to_be32(skb_dma_addr);
 		cur_p->len = cpu_to_be32(skb_frag_size(frag));
-		cur_p->app0 = 0;
+		cur_p->app0 = cpu_to_be32(STS_CTRL_APP0_INUSE);
 		frag++;
 	}
 	cur_p->app0 |= cpu_to_be32(STS_CTRL_APP0_EOP);
