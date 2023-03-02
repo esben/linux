@@ -396,7 +396,7 @@ static int temac_dma_bd_init(struct net_device *ndev)
 	lp->rx_bd_tail = lp->rx_bd_num - 1;
 
 	/* Enable RX DMA transfers */
-	wmb();
+	dma_wmb();
 	lp->dma_out(lp, RX_CURDESC_PTR,  lp->rx_bd_p);
 	lp->dma_out(lp, RX_TAILDESC_PTR,
 		       lp->rx_bd_p + (sizeof(*lp->rx_bd_v) * lp->rx_bd_tail));
@@ -810,7 +810,7 @@ static void temac_start_xmit_done(struct net_device *ndev)
 		/* Make sure that the other fields are read after bd is
 		 * released by dma
 		 */
-		rmb();
+		dma_rmb();
 		dma_unmap_single(ndev->dev.parent, be32_to_cpu(cur_p->phys),
 				 be32_to_cpu(cur_p->len), DMA_TO_DEVICE);
 		skb = (struct sk_buff *)ptr_from_txbd(cur_p);
@@ -827,7 +827,7 @@ static void temac_start_xmit_done(struct net_device *ndev)
 		/* app0 must be visible last, as it is used to flag
 		 * availability of the bd
 		 */
-		smp_mb();
+		smb_wmb();
 		cur_p->app0 = 0;
 
 		lp->tx_bd_ci++;
@@ -989,7 +989,7 @@ temac_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 	skb_tx_timestamp(skb);
 
 	/* Kick off the transfer */
-	wmb();
+	dma_wmb();
 	lp->dma_out(lp, TX_TAILDESC_PTR, tail_p); /* DMA start */
 
 	if (temac_check_tx_bd_space(lp, MAX_SKB_FRAGS + 1))
