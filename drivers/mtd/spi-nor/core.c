@@ -2972,8 +2972,6 @@ static int spi_nor_init_params(struct spi_nor *nor)
 	if (!nor->params)
 		return -ENOMEM;
 
-	spi_nor_init_default_params(nor);
-
 	if (spi_nor_needs_sfdp(nor)) {
 		ret = spi_nor_parse_sfdp(nor);
 		if (ret) {
@@ -2981,6 +2979,7 @@ static int spi_nor_init_params(struct spi_nor *nor)
 			return ret;
 		}
 	} else {
+		spi_nor_init_default_params(nor);
 		spi_nor_no_sfdp_init_params(nor);
 		spi_nor_manufacturer_init_params(nor);
 
