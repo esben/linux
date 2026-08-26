@@ -25,6 +25,7 @@
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
 #include <linux/property.h>
+#include <linux/regmap.h>
 #include <linux/types.h>
 #include <linux/regulator/consumer.h>
 
@@ -109,6 +110,7 @@
 /**
  * struct mma8452_data - IIO device private data structure
  * @client:			the I2C client object
+ * @regmap:			regmap for I2C register access
  * @lock:			mutex for synchronziation of register
  *				read-modify-write sequences and holding chip in
  *				STANDBY mode while writing to registers
@@ -117,13 +119,12 @@
  * @regs:			reference to voltage regulators
  * @buffer:			triggered buffer
  * @sleep_val:			time in ms to sleep while waiting for drdy
- * @ctrl_reg1:			CTRL_REG1 register shadow value
- * @data_cfg:			DATA_CFG register shadow value
  * @ctrl_reg4:			CTRL_REG4 register value to restore on resume
  * @open_drain:			true for irq pin in open-drain mode
  */
 struct mma8452_data {
 	struct i2c_client *client;
+	struct regmap *regmap;
 	struct mutex lock;
 	struct iio_mount_matrix orientation;
 	const struct mma_chip_info *chip_info;
@@ -136,9 +137,7 @@ struct mma8452_data {
 	} buffer;
 
 	int sleep_val;
-	u8 ctrl_reg1;
-	u8 data_cfg;
-	u8 ctrl_reg4;
+	unsigned int ctrl_reg4;
 	bool open_drain;
 };
 
@@ -217,16 +216,50 @@ enum {
 	idx_ts,
 };
 
+static bool mma8452_volatile_reg(struct device *dev, unsigned int reg)
+{
+	switch (reg) {
+	case MMA8452_STATUS:
+	case MMA8452_OUT_X:
+	case MMA8452_OUT_X + 1:
+	case MMA8452_OUT_Y:
+	case MMA8452_OUT_Y + 1:
+	case MMA8452_OUT_Z:
+	case MMA8452_OUT_Z + 1:
+	case MMA8452_INT_SRC:
+	case MMA8452_FF_MT_SRC:
+	case MMA8452_TRANSIENT_SRC:
+	/*
+	 * CTRL_REG2's RST bit self-clears in hardware once reset completes.
+	 * mma8452_reset() polls this register to observe that, so it must never
+	 * be served from cache.
+	 */
+	case MMA8452_CTRL_REG2:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static const struct regmap_config mma8452_regmap_config = {
+	.reg_bits = 8,
+	.val_bits = 8,
+	.max_register = MMA8452_MAX_REG,
+	.volatile_reg = mma8452_volatile_reg,
+	.cache_type = REGCACHE_MAPLE,
+};
+
 static int mma8452_drdy(struct mma8452_data *data)
 {
 	int tries = 150;
 
 	while (tries-- > 0) {
-		int ret = i2c_smbus_read_byte_data(data->client,
-			MMA8452_STATUS);
+		unsigned int val;
+		int ret = regmap_read(data->regmap, MMA8452_STATUS, &val);
+
 		if (ret < 0)
 			return ret;
-		if ((ret & MMA8452_STATUS_DRDY) == MMA8452_STATUS_DRDY)
+		if ((val & MMA8452_STATUS_DRDY) == MMA8452_STATUS_DRDY)
 			return 0;
 
 		if (data->sleep_val <= 20)
@@ -254,8 +287,8 @@ static int mma8452_read(struct mma8452_data *data, __be16 buf[3])
 	if (ret < 0)
 		return ret;
 
-	ret = i2c_smbus_read_i2c_block_data(data->client, MMA8452_OUT_X,
-					    3 * sizeof(__be16), (u8 *)buf);
+	ret = regmap_bulk_read(data->regmap, MMA8452_OUT_X, buf,
+			       3 * sizeof(__be16));
 	if (ret < 0)
 		return ret;
 
@@ -287,10 +320,19 @@ static int mma8452_get_int_plus_micros_index(const int (*vals)[2], int n,
 	return -EINVAL;
 }
 
+/*
+ * CTRL_REG1 is cacheable and always populated by mma8452_probe() before this
+ * can be called, so a regmap_read() failure here means something is
+ * fundamentally wrong with the regmap state rather than a real bus error. Fall
+ * back to index 0 (the register's power-on default) in that case.
+ */
 static unsigned int mma8452_get_odr_index(struct mma8452_data *data)
 {
-	return (data->ctrl_reg1 & MMA8452_CTRL_DR_MASK) >>
-			MMA8452_CTRL_DR_SHIFT;
+	unsigned int val = 0;
+
+	regmap_read(data->regmap, MMA8452_CTRL_REG1, &val);
+
+	return (val & MMA8452_CTRL_DR_MASK) >> MMA8452_CTRL_DR_SHIFT;
 }
 
 static const int mma8452_samp_freq[8][2] = {
@@ -361,12 +403,12 @@ static const u16 mma8452_os_ratio[4][8] = {
 
 static int mma8452_get_power_mode(struct mma8452_data *data)
 {
-	int reg;
+	unsigned int reg;
+	int ret;
 
-	reg = i2c_smbus_read_byte_data(data->client,
-				       MMA8452_CTRL_REG2);
-	if (reg < 0)
-		return reg;
+	ret = regmap_read(data->regmap, MMA8452_CTRL_REG2, &reg);
+	if (ret < 0)
+		return ret;
 
 	return ((reg & MMA8452_CTRL_REG2_MODS_MASK) >>
 		MMA8452_CTRL_REG2_MODS_SHIFT);
@@ -471,8 +513,9 @@ static int mma8452_get_hp_filter_index(struct mma8452_data *data,
 static int mma8452_read_hp_filter(struct mma8452_data *data, int *hz, int *uHz)
 {
 	int j, i, ret;
+	unsigned int val;
 
-	ret = i2c_smbus_read_byte_data(data->client, MMA8452_HP_FILTER_CUTOFF);
+	ret = regmap_read(data->regmap, MMA8452_HP_FILTER_CUTOFF, &val);
 	if (ret < 0)
 		return ret;
 
@@ -481,9 +524,9 @@ static int mma8452_read_hp_filter(struct mma8452_data *data, int *hz, int *uHz)
 	if (j < 0)
 		return j;
 
-	ret &= MMA8452_HP_FILTER_CUTOFF_SEL_MASK;
-	*hz = mma8452_hp_filter_cutoff[j][i][ret][0];
-	*uHz = mma8452_hp_filter_cutoff[j][i][ret][1];
+	val &= MMA8452_HP_FILTER_CUTOFF_SEL_MASK;
+	*hz = mma8452_hp_filter_cutoff[j][i][val][0];
+	*uHz = mma8452_hp_filter_cutoff[j][i][val][1];
 
 	return 0;
 }
@@ -494,6 +537,7 @@ static int mma8452_read_raw(struct iio_dev *indio_dev,
 {
 	struct mma8452_data *data = iio_priv(indio_dev);
 	__be16 buffer[3];
+	unsigned int reg_val;
 	int i, ret;
 
 	switch (mask) {
@@ -515,7 +559,11 @@ static int mma8452_read_raw(struct iio_dev *indio_dev,
 		return IIO_VAL_INT;
 	}
 	case IIO_CHAN_INFO_SCALE:
-		i = data->data_cfg & MMA8452_DATA_CFG_FS_MASK;
+		ret = regmap_read(data->regmap, MMA8452_DATA_CFG, &reg_val);
+		if (ret < 0)
+			return ret;
+
+		i = reg_val & MMA8452_DATA_CFG_FS_MASK;
 		*val = data->chip_info->mma_scales[i][0];
 		*val2 = data->chip_info->mma_scales[i][1];
 
@@ -527,17 +575,20 @@ static int mma8452_read_raw(struct iio_dev *indio_dev,
 
 		return IIO_VAL_INT_PLUS_MICRO;
 	case IIO_CHAN_INFO_CALIBBIAS:
-		ret = i2c_smbus_read_byte_data(data->client,
-					       MMA8452_OFF_X +
-					       chan->scan_index);
+		ret = regmap_read(data->regmap,
+				  MMA8452_OFF_X + chan->scan_index, &reg_val);
 		if (ret < 0)
 			return ret;
 
-		*val = sign_extend32(ret, 7);
+		*val = sign_extend32(reg_val, 7);
 
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_HIGH_PASS_FILTER_3DB_FREQUENCY:
-		if (data->data_cfg & MMA8452_DATA_CFG_HPF_MASK) {
+		ret = regmap_read(data->regmap, MMA8452_DATA_CFG, &reg_val);
+		if (ret < 0)
+			return ret;
+
+		if (reg_val & MMA8452_DATA_CFG_HPF_MASK) {
 			ret = mma8452_read_hp_filter(data, val, val2);
 			if (ret < 0)
 				return ret;
@@ -575,29 +626,31 @@ static int mma8452_calculate_sleep(struct mma8452_data *data)
 
 static int mma8452_standby(struct mma8452_data *data)
 {
-	return i2c_smbus_write_byte_data(data->client, MMA8452_CTRL_REG1,
-					data->ctrl_reg1 & ~MMA8452_CTRL_ACTIVE);
+	return regmap_update_bits(data->regmap, MMA8452_CTRL_REG1,
+				  MMA8452_CTRL_ACTIVE, 0);
 }
 
 static int mma8452_active(struct mma8452_data *data)
 {
-	return i2c_smbus_write_byte_data(data->client, MMA8452_CTRL_REG1,
-					 data->ctrl_reg1);
+	return regmap_update_bits(data->regmap, MMA8452_CTRL_REG1,
+				  MMA8452_CTRL_ACTIVE, MMA8452_CTRL_ACTIVE);
 }
 
 /* returns >0 if active, 0 if in standby and <0 on error */
 static int mma8452_is_active(struct mma8452_data *data)
 {
-	int reg;
+	unsigned int reg;
+	int ret;
 
-	reg = i2c_smbus_read_byte_data(data->client, MMA8452_CTRL_REG1);
-	if (reg < 0)
-		return reg;
+	ret = regmap_read(data->regmap, MMA8452_CTRL_REG1, &reg);
+	if (ret)
+		return ret;
 
 	return reg & MMA8452_CTRL_ACTIVE;
 }
 
-static int mma8452_change_config(struct mma8452_data *data, u8 reg, u8 val)
+static int _mma8452_change_config(struct mma8452_data *data, u8 reg,
+				  bool update_bits, u8 mask, u8 val)
 {
 	int ret;
 	int is_active;
@@ -615,7 +668,10 @@ static int mma8452_change_config(struct mma8452_data *data, u8 reg, u8 val)
 			return ret;
 	}
 
-	ret = i2c_smbus_write_byte_data(data->client, reg, val);
+	if (update_bits)
+		ret = regmap_update_bits(data->regmap, reg, mask, val);
+	else
+		ret = regmap_write(data->regmap, reg, val);
 	if (ret < 0)
 		return ret;
 
@@ -628,94 +684,80 @@ static int mma8452_change_config(struct mma8452_data *data, u8 reg, u8 val)
 	return 0;
 }
 
+static int mma8452_change_config(struct mma8452_data *data, u8 reg, u8 val)
+{
+	return _mma8452_change_config(data, reg, false, 0, val);
+}
+
+static int mma8452_change_config_bits(struct mma8452_data *data, u8 reg,
+				      u8 mask, u8 val)
+{
+	return _mma8452_change_config(data, reg, true, mask, val);
+}
+
 static int mma8452_set_power_mode(struct mma8452_data *data, u8 mode)
 {
-	int reg;
-
-	reg = i2c_smbus_read_byte_data(data->client,
-				       MMA8452_CTRL_REG2);
-	if (reg < 0)
-		return reg;
-
-	reg &= ~MMA8452_CTRL_REG2_MODS_MASK;
-	reg |= mode << MMA8452_CTRL_REG2_MODS_SHIFT;
-
-	return mma8452_change_config(data, MMA8452_CTRL_REG2, reg);
+	return mma8452_change_config_bits(data, MMA8452_CTRL_REG2,
+					  MMA8452_CTRL_REG2_MODS_MASK,
+					  mode << MMA8452_CTRL_REG2_MODS_SHIFT);
 }
 
 static int mma8452_set_interrupt_pin_mode(struct mma8452_data *data)
 {
-	int reg;
-
-	reg = i2c_smbus_read_byte_data(data->client, MMA8452_CTRL_REG3);
-	if (reg < 0)
-		return reg;
-
-	if (data->open_drain)
-		reg |= MMA8452_CTRL_REG3_PP_OD;
-	else
-		reg &= ~MMA8452_CTRL_REG3_PP_OD;
-
-	return i2c_smbus_write_byte_data(data->client, MMA8452_CTRL_REG3, reg);
+	return regmap_update_bits(data->regmap, MMA8452_CTRL_REG3,
+				  MMA8452_CTRL_REG3_PP_OD,
+				  data->open_drain ? MMA8452_CTRL_REG3_PP_OD : 0);
 }
 
 /* returns >0 if in freefall mode, 0 if not or <0 if an error occurred */
 static int mma8452_freefall_mode_enabled(struct mma8452_data *data)
 {
-	int val;
+	unsigned int val;
+	int ret;
 
-	val = i2c_smbus_read_byte_data(data->client, MMA8452_FF_MT_CFG);
-	if (val < 0)
-		return val;
+	ret = regmap_read(data->regmap, MMA8452_FF_MT_CFG, &val);
+	if (ret < 0)
+		return ret;
 
 	return !(val & MMA8452_FF_MT_CFG_OAE);
 }
 
 static int mma8452_set_freefall_mode(struct mma8452_data *data, bool state)
 {
-	int val;
+	int freefall_mode;
+	u8 mask = BIT(idx_x + MMA8452_FF_MT_CHAN_SHIFT) |
+		  BIT(idx_y + MMA8452_FF_MT_CHAN_SHIFT) |
+		  BIT(idx_z + MMA8452_FF_MT_CHAN_SHIFT) |
+		  MMA8452_FF_MT_CFG_OAE;
+	u8 val;
 
-	if ((state && mma8452_freefall_mode_enabled(data)) ||
-	    (!state && !(mma8452_freefall_mode_enabled(data))))
+	freefall_mode = mma8452_freefall_mode_enabled(data);
+	if (freefall_mode < 0)
+		return freefall_mode;
+	if ((state && freefall_mode) || (!state && !freefall_mode))
 		return 0;
 
-	val = i2c_smbus_read_byte_data(data->client, MMA8452_FF_MT_CFG);
-	if (val < 0)
-		return val;
+	if (state)
+		val = BIT(idx_x + MMA8452_FF_MT_CHAN_SHIFT) |
+		      BIT(idx_y + MMA8452_FF_MT_CHAN_SHIFT) |
+		      BIT(idx_z + MMA8452_FF_MT_CHAN_SHIFT);
+	else
+		val = MMA8452_FF_MT_CFG_OAE;
 
-	if (state) {
-		val |= BIT(idx_x + MMA8452_FF_MT_CHAN_SHIFT);
-		val |= BIT(idx_y + MMA8452_FF_MT_CHAN_SHIFT);
-		val |= BIT(idx_z + MMA8452_FF_MT_CHAN_SHIFT);
-		val &= ~MMA8452_FF_MT_CFG_OAE;
-	} else {
-		val &= ~BIT(idx_x + MMA8452_FF_MT_CHAN_SHIFT);
-		val &= ~BIT(idx_y + MMA8452_FF_MT_CHAN_SHIFT);
-		val &= ~BIT(idx_z + MMA8452_FF_MT_CHAN_SHIFT);
-		val |= MMA8452_FF_MT_CFG_OAE;
-	}
-
-	return mma8452_change_config(data, MMA8452_FF_MT_CFG, val);
+	return mma8452_change_config_bits(data, MMA8452_FF_MT_CFG, mask, val);
 }
 
 static int mma8452_set_hp_filter_frequency(struct mma8452_data *data,
 					   int val, int val2)
 {
-	int i, reg;
+	int i;
 
 	i = mma8452_get_hp_filter_index(data, val, val2);
 	if (i < 0)
 		return i;
 
-	reg = i2c_smbus_read_byte_data(data->client,
-				       MMA8452_HP_FILTER_CUTOFF);
-	if (reg < 0)
-		return reg;
-
-	reg &= ~MMA8452_HP_FILTER_CUTOFF_SEL_MASK;
-	reg |= i;
-
-	return mma8452_change_config(data, MMA8452_HP_FILTER_CUTOFF, reg);
+	return mma8452_change_config_bits(data, MMA8452_HP_FILTER_CUTOFF,
+					  MMA8452_HP_FILTER_CUTOFF_SEL_MASK, i);
 }
 
 static int __mma8452_write_raw(struct iio_dev *indio_dev,
@@ -731,24 +773,23 @@ static int __mma8452_write_raw(struct iio_dev *indio_dev,
 		if (i < 0)
 			return i;
 
-		data->ctrl_reg1 &= ~MMA8452_CTRL_DR_MASK;
-		data->ctrl_reg1 |= i << MMA8452_CTRL_DR_SHIFT;
+		ret = mma8452_change_config_bits(data, MMA8452_CTRL_REG1,
+						 MMA8452_CTRL_DR_MASK,
+						 i << MMA8452_CTRL_DR_SHIFT);
+		if (ret < 0)
+			return ret;
 
 		data->sleep_val = mma8452_calculate_sleep(data);
 
-		return mma8452_change_config(data, MMA8452_CTRL_REG1,
-					     data->ctrl_reg1);
+		return 0;
 
 	case IIO_CHAN_INFO_SCALE:
 		i = mma8452_get_scale_index(data, val, val2);
 		if (i < 0)
 			return  i;
 
-		data->data_cfg &= ~MMA8452_DATA_CFG_FS_MASK;
-		data->data_cfg |= i;
-
-		return mma8452_change_config(data, MMA8452_DATA_CFG,
-					     data->data_cfg);
+		return mma8452_change_config_bits(data, MMA8452_DATA_CFG,
+						  MMA8452_DATA_CFG_FS_MASK, i);
 
 	case IIO_CHAN_INFO_CALIBBIAS:
 		if (val < -128 || val > 127)
@@ -759,17 +800,18 @@ static int __mma8452_write_raw(struct iio_dev *indio_dev,
 					     val);
 
 	case IIO_CHAN_INFO_HIGH_PASS_FILTER_3DB_FREQUENCY:
-		if (val == 0 && val2 == 0) {
-			data->data_cfg &= ~MMA8452_DATA_CFG_HPF_MASK;
-		} else {
-			data->data_cfg |= MMA8452_DATA_CFG_HPF_MASK;
-			ret = mma8452_set_hp_filter_frequency(data, val, val2);
-			if (ret < 0)
-				return ret;
-		}
+		if (val == 0 && val2 == 0)
+			return mma8452_change_config_bits(data, MMA8452_DATA_CFG,
+							  MMA8452_DATA_CFG_HPF_MASK,
+							  0);
 
-		return mma8452_change_config(data, MMA8452_DATA_CFG,
-					     data->data_cfg);
+		ret = mma8452_set_hp_filter_frequency(data, val, val2);
+		if (ret < 0)
+			return ret;
+
+		return mma8452_change_config_bits(data, MMA8452_DATA_CFG,
+						  MMA8452_DATA_CFG_HPF_MASK,
+						  MMA8452_DATA_CFG_HPF_MASK);
 
 	case IIO_CHAN_INFO_OVERSAMPLING_RATIO:
 		j = mma8452_get_odr_index(data);
@@ -840,13 +882,14 @@ static int mma8452_motion_mode_enabled(struct mma8452_data *data,
 				       const struct mma8452_event_regs *ev_regs,
 				       const struct iio_chan_spec *chan)
 {
+	unsigned int val;
 	int ret;
 
-	ret = i2c_smbus_read_byte_data(data->client, ev_regs->ev_cfg);
+	ret = regmap_read(data->regmap, ev_regs->ev_cfg, &val);
 	if (ret < 0)
 		return ret;
 
-	return !!(ret & BIT(chan->scan_index + ev_regs->ev_cfg_chan_shift));
+	return !!(val & BIT(chan->scan_index + ev_regs->ev_cfg_chan_shift));
 }
 
 static int mma8452_read_event_value(struct iio_dev *indio_dev,
@@ -858,6 +901,7 @@ static int mma8452_read_event_value(struct iio_dev *indio_dev,
 {
 	struct mma8452_data *data = iio_priv(indio_dev);
 	struct device *dev = &data->client->dev;
+	unsigned int reg_val;
 	int ret, us, power_mode;
 	const struct mma8452_event_regs *ev_regs;
 
@@ -871,16 +915,16 @@ static int mma8452_read_event_value(struct iio_dev *indio_dev,
 
 	switch (info) {
 	case IIO_EV_INFO_VALUE:
-		ret = i2c_smbus_read_byte_data(data->client, ev_regs->ev_ths);
+		ret = regmap_read(data->regmap, ev_regs->ev_ths, &reg_val);
 		if (ret < 0)
 			break;
 
-		*val = ret & ev_regs->ev_ths_mask;
+		*val = reg_val & ev_regs->ev_ths_mask;
 		ret = IIO_VAL_INT;
 		break;
 
 	case IIO_EV_INFO_PERIOD:
-		ret = i2c_smbus_read_byte_data(data->client, ev_regs->ev_count);
+		ret = regmap_read(data->regmap, ev_regs->ev_count, &reg_val);
 		if (ret < 0)
 			break;
 
@@ -890,7 +934,7 @@ static int mma8452_read_event_value(struct iio_dev *indio_dev,
 			break;
 		}
 
-		us = ret * mma8452_time_step_us[power_mode][
+		us = reg_val * mma8452_time_step_us[power_mode][
 				mma8452_get_odr_index(data)];
 		*val = us / USEC_PER_SEC;
 		*val2 = us % USEC_PER_SEC;
@@ -898,12 +942,12 @@ static int mma8452_read_event_value(struct iio_dev *indio_dev,
 		break;
 
 	case IIO_EV_INFO_HIGH_PASS_FILTER_3DB:
-		ret = i2c_smbus_read_byte_data(data->client,
-					       MMA8452_TRANSIENT_CFG);
+		ret = regmap_read(data->regmap, MMA8452_TRANSIENT_CFG,
+				  &reg_val);
 		if (ret < 0)
 			break;
 
-		if (ret & MMA8452_TRANSIENT_CFG_HPF_BYP) {
+		if (reg_val & MMA8452_TRANSIENT_CFG_HPF_BYP) {
 			*val = 0;
 			*val2 = 0;
 		} else {
@@ -931,7 +975,7 @@ static int mma8452_write_event_value(struct iio_dev *indio_dev,
 {
 	struct mma8452_data *data = iio_priv(indio_dev);
 	struct device *dev = &data->client->dev;
-	int ret, reg, steps;
+	int ret, steps;
 	const struct mma8452_event_regs *ev_regs;
 
 	ret = mma8452_get_event_regs(data, chan, dir, &ev_regs);
@@ -970,23 +1014,21 @@ static int mma8452_write_event_value(struct iio_dev *indio_dev,
 		break;
 
 	case IIO_EV_INFO_HIGH_PASS_FILTER_3DB:
-		reg = i2c_smbus_read_byte_data(data->client,
-					       MMA8452_TRANSIENT_CFG);
-		if (reg < 0) {
-			ret = reg;
+		if (val == 0 && val2 == 0) {
+			ret = mma8452_change_config_bits(data,
+							 MMA8452_TRANSIENT_CFG,
+							 MMA8452_TRANSIENT_CFG_HPF_BYP,
+							 MMA8452_TRANSIENT_CFG_HPF_BYP);
 			break;
 		}
 
-		if (val == 0 && val2 == 0) {
-			reg |= MMA8452_TRANSIENT_CFG_HPF_BYP;
-		} else {
-			reg &= ~MMA8452_TRANSIENT_CFG_HPF_BYP;
-			ret = mma8452_set_hp_filter_frequency(data, val, val2);
-			if (ret < 0)
-				break;
-		}
+		ret = mma8452_set_hp_filter_frequency(data, val, val2);
+		if (ret < 0)
+			break;
 
-		ret = mma8452_change_config(data, MMA8452_TRANSIENT_CFG, reg);
+		ret = mma8452_change_config_bits(data, MMA8452_TRANSIENT_CFG,
+						 MMA8452_TRANSIENT_CFG_HPF_BYP,
+						 0);
 		break;
 
 	default:
@@ -1027,7 +1069,8 @@ static int mma8452_write_event_config(struct iio_dev *indio_dev,
 {
 	struct mma8452_data *data = iio_priv(indio_dev);
 	struct device *dev = &data->client->dev;
-	int val, ret;
+	u8 mask, val;
+	int ret;
 	const struct mma8452_event_regs *ev_regs;
 
 	switch (dir) {
@@ -1061,17 +1104,16 @@ static int mma8452_write_event_config(struct iio_dev *indio_dev,
 		ret = mma8452_set_freefall_mode(data, state);
 		break;
 	case IIO_EV_DIR_RISING:
-		val = i2c_smbus_read_byte_data(data->client, ev_regs->ev_cfg);
-		if (val < 0) {
-			ret = val;
-			break;
-		}
+		mask = BIT(chan->scan_index + ev_regs->ev_cfg_chan_shift) |
+		       ev_regs->ev_cfg_ele;
+		val = ev_regs->ev_cfg_ele;
 
 		if (state) {
 			if (mma8452_freefall_mode_enabled(data)) {
-				val &= ~BIT(idx_x + ev_regs->ev_cfg_chan_shift);
-				val &= ~BIT(idx_y + ev_regs->ev_cfg_chan_shift);
-				val &= ~BIT(idx_z + ev_regs->ev_cfg_chan_shift);
+				mask |= BIT(idx_x + ev_regs->ev_cfg_chan_shift) |
+					BIT(idx_y + ev_regs->ev_cfg_chan_shift) |
+					BIT(idx_z + ev_regs->ev_cfg_chan_shift) |
+					MMA8452_FF_MT_CFG_OAE;
 				val |= MMA8452_FF_MT_CFG_OAE;
 			}
 			val |= BIT(chan->scan_index +
@@ -1081,14 +1123,10 @@ static int mma8452_write_event_config(struct iio_dev *indio_dev,
 				ret = 0;
 				break;
 			}
-
-			val &= ~BIT(chan->scan_index +
-					ev_regs->ev_cfg_chan_shift);
 		}
 
-		val |= ev_regs->ev_cfg_ele;
-
-		ret = mma8452_change_config(data, ev_regs->ev_cfg, val);
+		ret = mma8452_change_config_bits(data, ev_regs->ev_cfg, mask,
+						 val);
 		break;
 	default:
 		break; /* Never reached, but compiler likes it this way */
@@ -1104,10 +1142,11 @@ static void mma8452_transient_interrupt(struct iio_dev *indio_dev)
 {
 	struct mma8452_data *data = iio_priv(indio_dev);
 	s64 ts = iio_get_time_ns(indio_dev);
-	int src;
+	unsigned int src;
+	int ret;
 
-	src = i2c_smbus_read_byte_data(data->client, MMA8452_TRANSIENT_SRC);
-	if (src < 0)
+	ret = regmap_read(data->regmap, MMA8452_TRANSIENT_SRC, &src);
+	if (ret < 0)
 		return;
 
 	if (src & MMA8452_TRANSIENT_SRC_XTRANSE)
@@ -1138,8 +1177,8 @@ static irqreturn_t mma8452_interrupt(int irq, void *p)
 	struct mma8452_data *data = iio_priv(indio_dev);
 	struct device *dev = &data->client->dev;
 	irqreturn_t ret = IRQ_NONE;
-	int pm_status;
-	int src;
+	int pm_status, read_ret;
+	unsigned int src;
 
 	pm_status = pm_runtime_get_if_active(dev);
 	if (pm_status == 0)
@@ -1152,8 +1191,8 @@ static irqreturn_t mma8452_interrupt(int irq, void *p)
 	 * is active.
 	 */
 
-	src = i2c_smbus_read_byte_data(data->client, MMA8452_INT_SRC);
-	if (src < 0)
+	read_ret = regmap_read(data->regmap, MMA8452_INT_SRC, &src);
+	if (read_ret < 0)
 		goto out_runtime_put;
 
 	if (!(src & (data->chip_info->enabled_events | MMA8452_INT_DRDY)))
@@ -1215,7 +1254,6 @@ static int mma8452_reg_access_dbg(struct iio_dev *indio_dev,
 				  unsigned int reg, unsigned int writeval,
 				  unsigned int *readval)
 {
-	int ret;
 	struct mma8452_data *data = iio_priv(indio_dev);
 	struct device *dev = &data->client->dev;
 
@@ -1226,16 +1264,10 @@ static int mma8452_reg_access_dbg(struct iio_dev *indio_dev,
 	if (PM_RUNTIME_ACQUIRE_ERR(&pm))
 		return PM_RUNTIME_ACQUIRE_ERR(&pm);
 
-	if (readval) {
-		ret = i2c_smbus_read_byte_data(data->client, reg);
-		if (ret >= 0) {
-			*readval = ret;
-			ret = 0;
-		}
-	} else
-		ret = mma8452_change_config(data, reg, writeval);
-
-	return ret;
+	if (readval)
+		return regmap_read(data->regmap, reg, readval);
+	else
+		return mma8452_change_config(data, reg, writeval);
 }
 
 static const struct iio_event_spec mma8452_freefall_event[] = {
@@ -1557,7 +1589,7 @@ static int mma8452_data_rdy_trigger_set_state(struct iio_trigger *trig,
 	struct iio_dev *indio_dev = iio_trigger_get_drvdata(trig);
 	struct mma8452_data *data = iio_priv(indio_dev);
 	struct device *dev = &data->client->dev;
-	int reg, ret;
+	int ret;
 
 	if (state) {
 		ret = pm_runtime_resume_and_get(dev);
@@ -1565,16 +1597,9 @@ static int mma8452_data_rdy_trigger_set_state(struct iio_trigger *trig,
 			return ret;
 	}
 
-	reg = i2c_smbus_read_byte_data(data->client, MMA8452_CTRL_REG4);
-	if (reg < 0)
-		return reg;
-
-	if (state)
-		reg |= MMA8452_INT_DRDY;
-	else
-		reg &= ~MMA8452_INT_DRDY;
-
-	ret = mma8452_change_config(data, MMA8452_CTRL_REG4, reg);
+	ret = mma8452_change_config_bits(data, MMA8452_CTRL_REG4,
+					 MMA8452_INT_DRDY,
+					 state ? MMA8452_INT_DRDY : 0);
 
 	if (!state || ret < 0)
 		pm_runtime_put_autosuspend(dev);
@@ -1617,10 +1642,17 @@ static void mma8452_trigger_cleanup(struct iio_dev *indio_dev)
 		iio_trigger_unregister(indio_dev->trig);
 }
 
-static int mma8452_reset(struct i2c_client *client)
+static int mma8452_reset(struct mma8452_data *data)
 {
+	unsigned int reg;
 	int i;
 	int ret;
+
+	/*
+	 * We don't want to have the RST bit stuck in the cache, and we need
+	 * volatile reads in the poll loop.
+	 */
+	regcache_cache_bypass(data->regmap, true);
 
 	/*
 	 * Find on fxls8471, after config reset bit, it reset immediately,
@@ -1628,22 +1660,21 @@ static int mma8452_reset(struct i2c_client *client)
 	 * The following code will read the reset register, and check whether
 	 * this reset works.
 	 */
-	i2c_smbus_write_byte_data(client,
-				  MMA8452_CTRL_REG2,
-				  MMA8452_CTRL_REG2_RST);
+	regmap_write(data->regmap, MMA8452_CTRL_REG2, MMA8452_CTRL_REG2_RST);
 
 	for (i = 0; i < 10; i++) {
 		usleep_range(100, 200);
-		ret = i2c_smbus_read_byte_data(client, MMA8452_CTRL_REG2);
-		if (ret == -EIO)
-			continue; /* I2C comm reset */
-		if (ret < 0)
-			return ret;
-		if (!(ret & MMA8452_CTRL_REG2_RST))
-			return 0;
+		ret = regmap_read(data->regmap, MMA8452_CTRL_REG2, &reg);
+		if (ret)
+			continue; /* I2C comm not yet restored after reset */
+		if (!(reg & MMA8452_CTRL_REG2_RST))
+			break;
 	}
+	if (i == 10)
+		ret = -ETIMEDOUT;
 
-	return -ETIMEDOUT;
+	regcache_cache_bypass(data->regmap, false);
+	return ret;
 }
 
 static const struct of_device_id mma8452_dt_ids[] = {
@@ -1662,6 +1693,7 @@ static int mma8452_probe(struct i2c_client *client)
 	struct device *dev = &client->dev;
 	struct mma8452_data *data;
 	struct iio_dev *indio_dev;
+	unsigned int who_am_i;
 	int ret;
 
 	indio_dev = devm_iio_device_alloc(dev, sizeof(*data));
@@ -1671,6 +1703,11 @@ static int mma8452_probe(struct i2c_client *client)
 	data = iio_priv(indio_dev);
 	data->client = client;
 	mutex_init(&data->lock);
+
+	data->regmap = devm_regmap_init_i2c(client, &mma8452_regmap_config);
+	if (IS_ERR(data->regmap))
+		return dev_err_probe(dev, PTR_ERR(data->regmap),
+				     "failed to initialize regmap\n");
 
 	data->chip_info = i2c_get_match_data(client);
 	if (!data->chip_info)
@@ -1690,18 +1727,18 @@ static int mma8452_probe(struct i2c_client *client)
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to enable regulators\n");
 
-	ret = i2c_smbus_read_byte_data(client, MMA8452_WHO_AM_I);
+	ret = regmap_read(data->regmap, MMA8452_WHO_AM_I, &who_am_i);
 	if (ret < 0)
 		goto disable_regulators;
 
-	switch (ret) {
+	switch (who_am_i) {
 	case MMA8451_DEVICE_ID:
 	case MMA8452_DEVICE_ID:
 	case MMA8453_DEVICE_ID:
 	case MMA8652_DEVICE_ID:
 	case MMA8653_DEVICE_ID:
 	case FXLS8471_DEVICE_ID:
-		if (ret == data->chip_info->chip_id)
+		if (who_am_i == data->chip_info->chip_id)
 			break;
 		fallthrough;
 	default:
@@ -1720,13 +1757,12 @@ static int mma8452_probe(struct i2c_client *client)
 	indio_dev->num_channels = data->chip_info->num_channels;
 	indio_dev->available_scan_masks = mma8452_scan_masks;
 
-	ret = mma8452_reset(client);
+	ret = mma8452_reset(data);
 	if (ret < 0)
 		goto disable_regulators;
 
-	data->data_cfg = MMA8452_DATA_CFG_FS_2G;
-	ret = i2c_smbus_write_byte_data(client, MMA8452_DATA_CFG,
-					data->data_cfg);
+	ret = regmap_write(data->regmap, MMA8452_DATA_CFG,
+			   MMA8452_DATA_CFG_FS_2G);
 	if (ret < 0)
 		goto disable_regulators;
 
@@ -1734,8 +1770,8 @@ static int mma8452_probe(struct i2c_client *client)
 	 * By default set transient threshold to max to avoid events if
 	 * enabling without configuring threshold.
 	 */
-	ret = i2c_smbus_write_byte_data(client, MMA8452_TRANSIENT_THS,
-					MMA8452_TRANSIENT_THS_MASK);
+	ret = regmap_write(data->regmap, MMA8452_TRANSIENT_THS,
+			   MMA8452_TRANSIENT_THS_MASK);
 	if (ret < 0)
 		goto disable_regulators;
 
@@ -1747,18 +1783,16 @@ static int mma8452_probe(struct i2c_client *client)
 		if (irq2 == client->irq) {
 			dev_dbg(dev, "using interrupt line INT2\n");
 		} else {
-			ret = i2c_smbus_write_byte_data(client,
-							MMA8452_CTRL_REG5,
-							data->chip_info->all_events);
+			ret = regmap_write(data->regmap, MMA8452_CTRL_REG5,
+					   data->chip_info->all_events);
 			if (ret < 0)
 				goto disable_regulators;
 
 			dev_dbg(dev, "using interrupt line INT1\n");
 		}
 
-		ret = i2c_smbus_write_byte_data(client,
-						MMA8452_CTRL_REG4,
-						data->chip_info->enabled_events);
+		ret = regmap_write(data->regmap, MMA8452_CTRL_REG4,
+				   data->chip_info->enabled_events);
 		if (ret < 0)
 			goto disable_regulators;
 
@@ -1772,15 +1806,13 @@ static int mma8452_probe(struct i2c_client *client)
 	if (ret)
 		goto trigger_cleanup;
 
-	data->ctrl_reg1 = MMA8452_CTRL_ACTIVE |
-			  (MMA8452_CTRL_DR_DEFAULT << MMA8452_CTRL_DR_SHIFT);
-
-	data->sleep_val = mma8452_calculate_sleep(data);
-
-	ret = i2c_smbus_write_byte_data(client, MMA8452_CTRL_REG1,
-					data->ctrl_reg1);
+	ret = regmap_write(data->regmap, MMA8452_CTRL_REG1,
+			   MMA8452_CTRL_ACTIVE |
+			   (MMA8452_CTRL_DR_DEFAULT << MMA8452_CTRL_DR_SHIFT));
 	if (ret < 0)
 		goto trigger_cleanup;
+
+	data->sleep_val = mma8452_calculate_sleep(data);
 
 	ret = iio_triggered_buffer_setup(indio_dev, NULL,
 					 mma8452_trigger_handler, NULL);
@@ -1878,6 +1910,25 @@ static void mma8452_remove(struct i2c_client *client)
 	}
 }
 
+static void mma8452_regmap_cache_only(struct mma8452_data *data)
+{
+	regcache_cache_only(data->regmap, true);
+	regcache_mark_dirty(data->regmap);
+}
+
+static int mma8452_regmap_write_through(struct mma8452_data *data)
+{
+	struct device *dev = &data->client->dev;
+	int ret;
+	regcache_cache_only(data->regmap, false);
+	ret = regcache_sync(data->regmap);
+	if (ret) {
+		dev_err(dev, "failed to restore register cache: %d\n", ret);
+		mma8452_regmap_cache_only(data);
+	}
+	return ret;
+}
+
 static int mma8452_runtime_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
@@ -1893,15 +1944,14 @@ static int mma8452_runtime_suspend(struct device *dev)
 		return -EAGAIN;
 	}
 
-	ret = i2c_smbus_read_byte_data(client, MMA8452_CTRL_REG4);
-	if (ret < 0) {
+	ret = regmap_read(data->regmap, MMA8452_CTRL_REG4, &data->ctrl_reg4);
+	if (ret) {
 		dev_warn(dev, "backing up CTRL_REG4 failed\n");
 		ret = -EAGAIN;
 		goto out_active;
-	} else
-		data->ctrl_reg4 = ret;
+	}
 
-	ret = i2c_smbus_write_byte_data(client, MMA8452_CTRL_REG4, 0);
+	ret = regmap_write(data->regmap, MMA8452_CTRL_REG4, 0);
 	if (ret) {
 		dev_warn(dev, "disabling interrupt sources (CTRL_REG4) failed\n");
 		ret = -EAGAIN;
@@ -1916,16 +1966,23 @@ static int mma8452_runtime_suspend(struct device *dev)
 	if (client->irq)
 		synchronize_irq(client->irq);
 
+	/*
+	 * Regulators are about to be cut, so direct register access will not be
+	 * possible.
+	 */
+	mma8452_regmap_cache_only(data);
+
 	ret = regulator_bulk_disable(ARRAY_SIZE(data->regs), data->regs);
 	if (ret) {
 		dev_err(dev, "failed to disable regulators\n");
-		goto out_restore_ctrl_reg4;
+		goto out_write_through;
 	}
 
 	return 0;
 
-out_restore_ctrl_reg4:
-	if (i2c_smbus_write_byte_data(client, MMA8452_CTRL_REG4, data->ctrl_reg4))
+out_write_through:
+	(void)mma8452_regmap_write_through(data);
+	if (regmap_write(data->regmap, MMA8452_CTRL_REG4, data->ctrl_reg4))
 		dev_warn(dev, "restoring CTRL_REG4 failed\n");
 out_active:
 	if (mma8452_active(data))
@@ -1935,8 +1992,7 @@ out_active:
 
 static int mma8452_runtime_resume(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct iio_dev *indio_dev = i2c_get_clientdata(client);
+	struct iio_dev *indio_dev = i2c_get_clientdata(to_i2c_client(dev));
 	struct mma8452_data *data = iio_priv(indio_dev);
 	int ret, sleep_val;
 
@@ -1946,17 +2002,18 @@ static int mma8452_runtime_resume(struct device *dev)
 		return ret;
 	}
 
-	ret = mma8452_set_interrupt_pin_mode(data);
+	/* Restore register values from cache */
+	ret = mma8452_regmap_write_through(data);
 	if (ret)
-		goto runtime_resume_failed;
+		goto regulator_disable;
 
-	ret = i2c_smbus_write_byte_data(client, MMA8452_CTRL_REG4, data->ctrl_reg4);
+	ret = regmap_write(data->regmap, MMA8452_CTRL_REG4, data->ctrl_reg4);
 	if (ret)
-		goto runtime_resume_failed;
+		goto cache_only;
 
 	ret = mma8452_active(data);
 	if (ret < 0)
-		goto runtime_resume_failed;
+		goto cache_only;
 
 	ret = mma8452_get_odr_index(data);
 	sleep_val = 1000 / mma8452_samp_freq[ret][0];
@@ -1967,7 +2024,9 @@ static int mma8452_runtime_resume(struct device *dev)
 
 	return 0;
 
-runtime_resume_failed:
+cache_only:
+	mma8452_regmap_cache_only(data);
+regulator_disable:
 	regulator_bulk_disable(ARRAY_SIZE(data->regs), data->regs);
 
 	return ret;
