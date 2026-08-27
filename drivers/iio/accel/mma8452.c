@@ -1156,20 +1156,25 @@ static int mma8452_reg_access_dbg(struct iio_dev *indio_dev,
 {
 	int ret;
 	struct mma8452_data *data = iio_priv(indio_dev);
+	struct device *dev = &data->client->dev;
 
 	if (reg > MMA8452_MAX_REG)
 		return -EINVAL;
 
-	if (!readval)
-		return mma8452_change_config(data, reg, writeval);
+	PM_RUNTIME_ACQUIRE_IF_ENABLED_AUTOSUSPEND(dev, pm);
+	if (PM_RUNTIME_ACQUIRE_ERR(&pm))
+		return PM_RUNTIME_ACQUIRE_ERR(&pm);
 
-	ret = i2c_smbus_read_byte_data(data->client, reg);
-	if (ret < 0)
-		return ret;
+	if (readval) {
+		ret = i2c_smbus_read_byte_data(data->client, reg);
+		if (ret >= 0) {
+			*readval = ret;
+			ret = 0;
+		}
+	} else
+		ret = mma8452_change_config(data, reg, writeval);
 
-	*readval = ret;
-
-	return 0;
+	return ret;
 }
 
 static const struct iio_event_spec mma8452_freefall_event[] = {
