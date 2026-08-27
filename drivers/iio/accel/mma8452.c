@@ -552,15 +552,15 @@ static int mma8452_read_raw(struct iio_dev *indio_dev,
 	unsigned int reg_val;
 	int i, ret;
 
+	PM_RUNTIME_ACQUIRE_IF_ENABLED_AUTOSUSPEND(dev, pm);
+	if (PM_RUNTIME_ACQUIRE_ERR(&pm))
+		return PM_RUNTIME_ACQUIRE_ERR(&pm);
+
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW: {
 		IIO_DEV_ACQUIRE_DIRECT_MODE(indio_dev, claim);
 		if (IIO_DEV_ACQUIRE_FAILED(claim))
 			return -EBUSY;
-
-		PM_RUNTIME_ACQUIRE_IF_ENABLED_AUTOSUSPEND(dev, pm);
-		if (PM_RUNTIME_ACQUIRE_ERR(&pm))
-			return PM_RUNTIME_ACQUIRE_ERR(&pm);
 
 		ret = mma8452_read(data, buffer);
 		if (ret < 0)
@@ -621,9 +621,13 @@ static int mma8452_read_raw(struct iio_dev *indio_dev,
 
 		*val = mma8452_os_ratio[ret][i];
 		return IIO_VAL_INT;
+
+	default:
+		ret = -EINVAL;
+		break;
 	}
 
-	return -EINVAL;
+	return ret;
 }
 
 static int mma8452_calculate_sleep(struct mma8452_data *data)
