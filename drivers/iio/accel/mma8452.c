@@ -804,6 +804,47 @@ static int mma8452_set_freefall_mode(struct mma8452_data *data, bool state)
 	return regmap_update_bits(data->regmap, MMA8452_FF_MT_CFG, mask, val);
 }
 
+/* returns >0 if in motion mode, 0 if not or <0 if an error occurred */
+static int mma8452_motion_mode_enabled(struct mma8452_data *data,
+				       const struct mma8452_event_regs *ev_regs,
+				       const struct iio_chan_spec *chan)
+{
+	unsigned int val;
+	int ret;
+
+	ret = regmap_read(data->regmap, ev_regs->ev_cfg, &val);
+	if (ret < 0)
+		return ret;
+
+	return !!(val & BIT(chan->scan_index + ev_regs->ev_cfg_chan_shift));
+}
+
+static int mma8452_set_motion_mode(struct mma8452_data *data,
+				   const struct mma8452_event_regs *ev_regs,
+				   const struct iio_chan_spec *chan,
+				   bool state)
+{
+	u8 mask = BIT(chan->scan_index + ev_regs->ev_cfg_chan_shift) |
+		ev_regs->ev_cfg_ele;
+	u8 val = ev_regs->ev_cfg_ele;
+
+	if (state) {
+		if (mma8452_freefall_mode_enabled(data)) {
+			mask |= BIT(idx_x + ev_regs->ev_cfg_chan_shift) |
+				BIT(idx_y + ev_regs->ev_cfg_chan_shift) |
+				BIT(idx_z + ev_regs->ev_cfg_chan_shift) |
+				MMA8452_FF_MT_CFG_OAE;
+			val |= MMA8452_FF_MT_CFG_OAE;
+		}
+		val |= BIT(chan->scan_index + ev_regs->ev_cfg_chan_shift);
+	} else {
+		if (mma8452_freefall_mode_enabled(data))
+			return 0;
+	}
+
+	return regmap_update_bits(data->regmap, ev_regs->ev_cfg, mask, val);
+}
+
 static int mma8452_set_hp_filter_frequency(struct mma8452_data *data,
 					   int val, int val2)
 {
@@ -932,21 +973,6 @@ static int mma8452_get_event_regs(struct mma8452_data *data,
 	default:
 		return -EINVAL;
 	}
-}
-
-/* returns >0 if in motion mode, 0 if not or <0 if an error occurred */
-static int mma8452_motion_mode_enabled(struct mma8452_data *data,
-				       const struct mma8452_event_regs *ev_regs,
-				       const struct iio_chan_spec *chan)
-{
-	unsigned int val;
-	int ret;
-
-	ret = regmap_read(data->regmap, ev_regs->ev_cfg, &val);
-	if (ret < 0)
-		return ret;
-
-	return !!(val & BIT(chan->scan_index + ev_regs->ev_cfg_chan_shift));
 }
 
 static int mma8452_read_event_value(struct iio_dev *indio_dev,
@@ -1126,7 +1152,6 @@ static int mma8452_write_event_config(struct iio_dev *indio_dev,
 {
 	struct mma8452_data *data = iio_priv(indio_dev);
 	struct device *dev = &data->client->dev;
-	u8 mask, val;
 	int ret;
 	const struct mma8452_event_regs *ev_regs;
 
@@ -1172,28 +1197,7 @@ static int mma8452_write_event_config(struct iio_dev *indio_dev,
 		ret = mma8452_set_freefall_mode(data, state);
 		break;
 	case IIO_EV_DIR_RISING:
-		mask = BIT(chan->scan_index + ev_regs->ev_cfg_chan_shift) |
-		       ev_regs->ev_cfg_ele;
-		val = ev_regs->ev_cfg_ele;
-
-		if (state) {
-			if (mma8452_freefall_mode_enabled(data)) {
-				mask |= BIT(idx_x + ev_regs->ev_cfg_chan_shift) |
-					BIT(idx_y + ev_regs->ev_cfg_chan_shift) |
-					BIT(idx_z + ev_regs->ev_cfg_chan_shift) |
-					MMA8452_FF_MT_CFG_OAE;
-				val |= MMA8452_FF_MT_CFG_OAE;
-			}
-			val |= BIT(chan->scan_index +
-					ev_regs->ev_cfg_chan_shift);
-		} else {
-			if (mma8452_freefall_mode_enabled(data)) {
-				ret = 0;
-				break;
-			}
-		}
-
-		ret = regmap_update_bits(data->regmap, ev_regs->ev_cfg, mask, val);
+		ret = mma8452_set_motion_mode(data, ev_regs, chan, state);
 		break;
 	default:
 		break; /* Never reached, but compiler likes it this way */
