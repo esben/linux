@@ -1486,12 +1486,11 @@ static int mma8452_data_rdy_trigger_set_state(struct iio_trigger *trig,
 	struct device *dev = &data->client->dev;
 	int reg, ret;
 
-	if (state)
+	if (state) {
 		ret = pm_runtime_resume_and_get(dev);
-	else
-		ret = pm_runtime_put_autosuspend(dev);
-	if (ret < 0)
-		return ret;
+		if (ret < 0)
+			return ret;
+	}
 
 	reg = i2c_smbus_read_byte_data(data->client, MMA8452_CTRL_REG4);
 	if (reg < 0)
@@ -1502,7 +1501,12 @@ static int mma8452_data_rdy_trigger_set_state(struct iio_trigger *trig,
 	else
 		reg &= ~MMA8452_INT_DRDY;
 
-	return mma8452_change_config(data, MMA8452_CTRL_REG4, reg);
+	ret = mma8452_change_config(data, MMA8452_CTRL_REG4, reg);
+
+	if (!state || ret < 0)
+		pm_runtime_put_autosuspend(dev);
+
+	return ret;
 }
 
 static const struct iio_trigger_ops mma8452_trigger_ops = {
