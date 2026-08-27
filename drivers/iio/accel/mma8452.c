@@ -293,12 +293,7 @@ static int mma8452_drdy(struct mma8452_data *data)
 
 static int mma8452_read(struct mma8452_data *data, __be16 buf[3])
 {
-	struct device *dev = &data->client->dev;
 	int ret;
-
-	PM_RUNTIME_ACQUIRE_IF_ENABLED_AUTOSUSPEND(dev, pm);
-	if (PM_RUNTIME_ACQUIRE_ERR(&pm))
-		return PM_RUNTIME_ACQUIRE_ERR(&pm);
 
 	/* Ensure device stays in ACTIVE mode while accessing FIFO */
 	guard(active_mode)(data);
@@ -307,12 +302,8 @@ static int mma8452_read(struct mma8452_data *data, __be16 buf[3])
 	if (ret < 0)
 		return ret;
 
-	ret = regmap_bulk_read(data->regmap, MMA8452_OUT_X, buf,
-			       3 * sizeof(__be16));
-	if (ret < 0)
-		return ret;
-
-	return 0;
+	return regmap_bulk_read(data->regmap, MMA8452_OUT_X, buf,
+				3 * sizeof(__be16));
 }
 
 static ssize_t mma8452_show_int_plus_micros(char *buf, const int (*vals)[2],
@@ -556,6 +547,7 @@ static int mma8452_read_raw(struct iio_dev *indio_dev,
 			    int *val, int *val2, long mask)
 {
 	struct mma8452_data *data = iio_priv(indio_dev);
+	struct device *dev = &data->client->dev;
 	__be16 buffer[3];
 	unsigned int reg_val;
 	int i, ret;
@@ -565,6 +557,10 @@ static int mma8452_read_raw(struct iio_dev *indio_dev,
 		IIO_DEV_ACQUIRE_DIRECT_MODE(indio_dev, claim);
 		if (IIO_DEV_ACQUIRE_FAILED(claim))
 			return -EBUSY;
+
+		PM_RUNTIME_ACQUIRE_IF_ENABLED_AUTOSUSPEND(dev, pm);
+		if (PM_RUNTIME_ACQUIRE_ERR(&pm))
+			return PM_RUNTIME_ACQUIRE_ERR(&pm);
 
 		ret = mma8452_read(data, buffer);
 		if (ret < 0)
@@ -1315,6 +1311,8 @@ static irqreturn_t mma8452_trigger_handler(int irq, void *p)
 	struct mma8452_data *data = iio_priv(indio_dev);
 	int ret;
 
+	/* Note: mma8452_data_rdy_trigger_set_state() will be holding a runtime
+	 * PM reference when this function is called */
 	ret = mma8452_read(data, data->buffer.channels);
 	if (ret < 0)
 		goto done;
