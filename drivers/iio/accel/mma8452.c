@@ -241,49 +241,25 @@ static int mma8452_drdy(struct mma8452_data *data)
 	return -EIO;
 }
 
-static int mma8452_set_runtime_pm_state(struct i2c_client *client, bool on)
-{
-#ifdef CONFIG_PM
-	struct device *dev = &client->dev;
-	int ret;
-
-	if (on)
-		ret = pm_runtime_resume_and_get(dev);
-	else
-		ret = pm_runtime_put_autosuspend(dev);
-	if (ret < 0) {
-		dev_err(dev, "failed to change power state to %d\n", on);
-
-		return ret;
-	}
-#endif
-
-	return 0;
-}
-
 static int mma8452_read(struct mma8452_data *data, __be16 buf[3])
 {
+	struct device *dev = &data->client->dev;
 	int ret;
 
-	ret = mma8452_set_runtime_pm_state(data->client, true);
-	if (ret)
-		return ret;
+	PM_RUNTIME_ACQUIRE_IF_ENABLED_AUTOSUSPEND(dev, pm);
+	if (PM_RUNTIME_ACQUIRE_ERR(&pm))
+		return PM_RUNTIME_ACQUIRE_ERR(&pm);
 
 	ret = mma8452_drdy(data);
 	if (ret < 0)
-		goto out_runtime_put;
+		return ret;
 
 	ret = i2c_smbus_read_i2c_block_data(data->client, MMA8452_OUT_X,
 					    3 * sizeof(__be16), (u8 *)buf);
 	if (ret < 0)
-		goto out_runtime_put;
+		return ret;
 
-	return mma8452_set_runtime_pm_state(data->client, false);
-
-out_runtime_put:
-	mma8452_set_runtime_pm_state(data->client, false);
-
-	return ret;
+	return 0;
 }
 
 static ssize_t mma8452_show_int_plus_micros(char *buf, const int (*vals)[2],
@@ -1008,6 +984,7 @@ static int mma8452_write_event_config(struct iio_dev *indio_dev,
 				      bool state)
 {
 	struct mma8452_data *data = iio_priv(indio_dev);
+	struct device *dev = &data->client->dev;
 	int val, ret;
 	const struct mma8452_event_regs *ev_regs;
 
@@ -1015,8 +992,11 @@ static int mma8452_write_event_config(struct iio_dev *indio_dev,
 	if (ret)
 		return ret;
 
-	ret = mma8452_set_runtime_pm_state(data->client, state);
-	if (ret)
+	if (state)
+		ret = pm_runtime_resume_and_get(dev);
+	else
+		ret = pm_runtime_put_autosuspend(dev);
+	if (ret < 0)
 		return ret;
 
 	switch (dir) {
@@ -1503,10 +1483,14 @@ static int mma8452_data_rdy_trigger_set_state(struct iio_trigger *trig,
 {
 	struct iio_dev *indio_dev = iio_trigger_get_drvdata(trig);
 	struct mma8452_data *data = iio_priv(indio_dev);
+	struct device *dev = &data->client->dev;
 	int reg, ret;
 
-	ret = mma8452_set_runtime_pm_state(data->client, state);
-	if (ret)
+	if (state)
+		ret = pm_runtime_resume_and_get(dev);
+	else
+		ret = pm_runtime_put_autosuspend(dev);
+	if (ret < 0)
 		return ret;
 
 	reg = i2c_smbus_read_byte_data(data->client, MMA8452_CTRL_REG4);
