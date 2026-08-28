@@ -1787,8 +1787,15 @@ static void mma8452_remove(struct i2c_client *client)
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
 	struct mma8452_data *data = iio_priv(indio_dev);
 	struct device *dev = &client->dev;
+	int ret;
 
 	iio_device_unregister(indio_dev);
+
+	/*
+	 * Force the device active, ensuring that we have a known state to work
+	 * with.
+	 */
+	ret = pm_runtime_resume_and_get(&client->dev);
 
 	if (client->irq)
 		free_irq(client->irq, indio_dev);
@@ -1799,9 +1806,15 @@ static void mma8452_remove(struct i2c_client *client)
 
 	iio_triggered_buffer_cleanup(indio_dev);
 	mma8452_trigger_cleanup(indio_dev);
-	mma8452_standby(iio_priv(indio_dev));
 
-	regulator_bulk_disable(ARRAY_SIZE(data->regs), data->regs);
+	/*
+	 * If the resume above failed, the device should already be in standby
+	 * state with regulators disabled.
+	 */
+	if (!ret) {
+		mma8452_standby(data);
+		regulator_bulk_disable(ARRAY_SIZE(data->regs), data->regs);
+	}
 }
 
 #ifdef CONFIG_PM
