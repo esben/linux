@@ -111,9 +111,9 @@
  * struct mma8452_data - IIO device private data structure
  * @client:			the I2C client object
  * @regmap:			regmap for I2C register access
- * @lock:			mutex for synchronziation of register
- *				read-modify-write sequences and holding chip in
- *				STANDBY mode while writing to registers
+ * @lock:			mutex for synchronziation of holding chip in
+ *				ACTIVE or STANDBY mode, used in active_mode
+ *				and standby_mode* guards.
  * @orientation:		mounting matrix, flipped axis etc.
  * @chip_info:			chip specific data
  * @regs:			reference to voltage regulators
@@ -121,6 +121,8 @@
  * @sleep_val:			time in ms to sleep while waiting for drdy
  * @ctrl_reg4:			CTRL_REG4 register value to restore on resume
  * @open_drain:			true for irq pin in open-drain mode
+ * @restore_active:		true if standby_mode guard should restore to
+ *				ACTIVE mode on exit
  */
 struct mma8452_data {
 	struct i2c_client *client;
@@ -139,6 +141,7 @@ struct mma8452_data {
 	int sleep_val;
 	unsigned int ctrl_reg4;
 	bool open_drain;
+	bool restore_active;
 };
 
 /**
@@ -249,6 +252,20 @@ static const struct regmap_config mma8452_regmap_config = {
 	.cache_type = REGCACHE_MAPLE,
 };
 
+static void __mma8452_active_mode_lock(struct mma8452_data *data)
+{
+	mutex_lock(&data->lock);
+}
+
+static void __mma8452_active_mode_unlock(struct mma8452_data *data)
+{
+	mutex_unlock(&data->lock);
+}
+
+DEFINE_GUARD(active_mode, struct mma8452_data *,
+	     __mma8452_active_mode_lock(_T),
+	     if (_T) __mma8452_active_mode_unlock(_T));
+
 static int mma8452_drdy(struct mma8452_data *data)
 {
 	int tries = 150;
@@ -282,6 +299,9 @@ static int mma8452_read(struct mma8452_data *data, __be16 buf[3])
 	PM_RUNTIME_ACQUIRE_IF_ENABLED_AUTOSUSPEND(dev, pm);
 	if (PM_RUNTIME_ACQUIRE_ERR(&pm))
 		return PM_RUNTIME_ACQUIRE_ERR(&pm);
+
+	/* Ensure device stays in ACTIVE mode while accessing FIFO */
+	guard(active_mode)(data);
 
 	ret = mma8452_drdy(data);
 	if (ret < 0)
@@ -546,8 +566,6 @@ static int mma8452_read_raw(struct iio_dev *indio_dev,
 		if (IIO_DEV_ACQUIRE_FAILED(claim))
 			return -EBUSY;
 
-		guard(mutex)(&data->lock);
-
 		ret = mma8452_read(data, buffer);
 		if (ret < 0)
 			return ret;
@@ -636,37 +654,77 @@ static int mma8452_active(struct mma8452_data *data)
 				  MMA8452_CTRL_ACTIVE, MMA8452_CTRL_ACTIVE);
 }
 
-/* returns >0 if active, 0 if in standby and <0 on error */
-static int mma8452_is_active(struct mma8452_data *data)
+static struct mma8452_data * __mma8452_standby_mode_init(struct mma8452_data *data)
 {
-	unsigned int reg;
+	struct device *dev = &data->client->dev;
 	int ret;
+	unsigned int reg;
+
+	mutex_lock(&data->lock);
 
 	ret = regmap_read(data->regmap, MMA8452_CTRL_REG1, &reg);
-	if (ret)
-		return ret;
+	if (ret) {
+		dev_warn(dev, "Failed to read ACTIVE/STANDBY mode status: %d\n", ret);
+		mutex_unlock(&data->lock);
+		return ERR_PTR(ret);
+	}
 
-	return reg & MMA8452_CTRL_ACTIVE;
+	if (!(reg & MMA8452_CTRL_ACTIVE)) {
+		/* Already in STANDBY mode */
+		data->restore_active = false;
+		return data;
+	}
+
+	data->restore_active = true;
+	ret = mma8452_standby(data);
+	if (ret) {
+		dev_warn(dev, "Transition to STANDBY mode failed: %d\n", ret);
+		mutex_unlock(&data->lock);
+		return ERR_PTR(ret);
+	}
+
+	return data;
 }
+
+static int mma8452_standby_mode_restore_active(struct mma8452_data *data)
+{
+	struct device *dev = &data->client->dev;
+	int ret = 0;
+
+	if (data->restore_active) {
+		ret = mma8452_active(data);
+		if (ret)
+			dev_err(dev, "Transition to ACTIVE mode failed: %d\n", ret);
+		data->restore_active = false;
+	}
+
+	return ret;
+}
+
+static void mma8452_standby_mode_keep(struct mma8452_data *data)
+{
+	data->restore_active = false;
+}
+
+static void __mma8452_standby_mode_exit(struct mma8452_data *data)
+{
+	mma8452_standby_mode_restore_active(data);
+	mutex_unlock(&data->lock);
+}
+
+DEFINE_CLASS(standby_mode, struct mma8452_data *,
+	     if (_T && !IS_ERR(_T)) __mma8452_standby_mode_exit(_T),
+	     __mma8452_standby_mode_init(data), struct mma8452_data *data);
 
 static int _mma8452_change_config(struct mma8452_data *data, u8 reg,
 				  bool update_bits, u8 mask, u8 val)
 {
 	int ret;
-	int is_active;
-
-	guard(mutex)(&data->lock);
-
-	is_active = mma8452_is_active(data);
-	if (is_active < 0)
-		return is_active;
 
 	/* config can only be changed when in standby */
-	if (is_active > 0) {
-		ret = mma8452_standby(data);
-		if (ret < 0)
-			return ret;
-	}
+	CLASS(standby_mode, standby_mode)(data);
+	if (IS_ERR(standby_mode))
+		return PTR_ERR(standby_mode);
 
 	if (update_bits)
 		ret = regmap_update_bits(data->regmap, reg, mask, val);
@@ -675,13 +733,12 @@ static int _mma8452_change_config(struct mma8452_data *data, u8 reg,
 	if (ret < 0)
 		return ret;
 
-	if (is_active > 0) {
-		ret = mma8452_active(data);
-		if (ret < 0)
-			return ret;
-	}
-
-	return 0;
+	/*
+	 * Restore ACTIVE mode manually instead of leaving it to the
+	 * standby_mode guard, so a failure to switch back is reported to the
+	 * caller instead of only being logged.
+	 */
+	return mma8452_standby_mode_restore_active(data);
 }
 
 static int mma8452_change_config(struct mma8452_data *data, u8 reg, u8 val)
@@ -744,7 +801,7 @@ static int mma8452_set_freefall_mode(struct mma8452_data *data, bool state)
 	else
 		val = MMA8452_FF_MT_CFG_OAE;
 
-	return mma8452_change_config_bits(data, MMA8452_FF_MT_CFG, mask, val);
+	return regmap_update_bits(data->regmap, MMA8452_FF_MT_CFG, mask, val);
 }
 
 static int mma8452_set_hp_filter_frequency(struct mma8452_data *data,
@@ -1073,6 +1130,17 @@ static int mma8452_write_event_config(struct iio_dev *indio_dev,
 	int ret;
 	const struct mma8452_event_regs *ev_regs;
 
+	/*
+	 * Hold standby_mode for the whole read-decide-write sequence below, so
+	 * that the enabled-state check and the resulting register update are
+	 * atomic with respect to concurrent calls (e.g. FALLING and RISING
+	 * event config being written from different sysfs attributes), which
+	 * would otherwise race on the shared FF_MT_CFG/event config register.
+	 */
+	CLASS(standby_mode, standby_mode)(data);
+	if (IS_ERR(standby_mode))
+		return PTR_ERR(standby_mode);
+
 	switch (dir) {
 	case IIO_EV_DIR_FALLING:
 		ret = mma8452_freefall_mode_enabled(data);
@@ -1125,8 +1193,7 @@ static int mma8452_write_event_config(struct iio_dev *indio_dev,
 			}
 		}
 
-		ret = mma8452_change_config_bits(data, ev_regs->ev_cfg, mask,
-						 val);
+		ret = regmap_update_bits(data->regmap, ev_regs->ev_cfg, mask, val);
 		break;
 	default:
 		break; /* Never reached, but compiler likes it this way */
@@ -1135,7 +1202,15 @@ static int mma8452_write_event_config(struct iio_dev *indio_dev,
 	if (!state || ret < 0)
 		pm_runtime_put_autosuspend(dev);
 
-	return ret;
+	if (ret < 0)
+		return ret;
+
+	/*
+	 * Restore ACTIVE mode manually instead of leaving it to the
+	 * standby_mode guard, so a failure to switch back is reported to the
+	 * caller instead of only being logged.
+	 */
+	return mma8452_standby_mode_restore_active(data);
 }
 
 static void mma8452_transient_interrupt(struct iio_dev *indio_dev)
@@ -1807,7 +1882,6 @@ static int mma8452_probe(struct i2c_client *client)
 		goto trigger_cleanup;
 
 	ret = regmap_write(data->regmap, MMA8452_CTRL_REG1,
-			   MMA8452_CTRL_ACTIVE |
 			   (MMA8452_CTRL_DR_DEFAULT << MMA8452_CTRL_DR_SHIFT));
 	if (ret < 0)
 		goto trigger_cleanup;
@@ -1842,18 +1916,22 @@ static int mma8452_probe(struct i2c_client *client)
 	pm_runtime_set_autosuspend_delay(dev, MMA8452_AUTO_SUSPEND_DELAY_MS);
 	pm_runtime_use_autosuspend(dev);
 
+	ret = mma8452_set_freefall_mode(data, false);
+	if (ret < 0)
+		goto runtime_suspend;
+
+	/* Switch to ACTIVE mode just before exposing user-space API */
+	ret = regmap_write(data->regmap, MMA8452_CTRL_REG1,
+			   MMA8452_CTRL_ACTIVE |
+			   (MMA8452_CTRL_DR_DEFAULT << MMA8452_CTRL_DR_SHIFT));
+	if (ret < 0)
+		goto runtime_suspend;
+
 	ret = iio_device_register(indio_dev);
 	if (ret < 0)
 		goto runtime_suspend;
 
-	ret = mma8452_set_freefall_mode(data, false);
-	if (ret < 0)
-		goto unregister_device;
-
 	return 0;
-
-unregister_device:
-	iio_device_unregister(indio_dev);
 
 runtime_suspend:
 	pm_runtime_disable(dev);
@@ -1929,6 +2007,44 @@ static int mma8452_regmap_write_through(struct mma8452_data *data)
 	return ret;
 }
 
+DEFINE_GUARD(mma8452_regmap_cache_only, struct mma8452_data *,
+	     mma8452_regmap_cache_only(_T),
+	     if (_T) (void)mma8452_regmap_write_through(_T));
+
+static struct mma8452_data * __mma8452_irqoff_init(struct mma8452_data *data)
+{
+	struct device *dev = &data->client->dev;
+	int ret;
+
+	ret = regmap_read(data->regmap, MMA8452_CTRL_REG4, &data->ctrl_reg4);
+	if (ret) {
+		dev_err(dev, "backing up CTRL_REG4 failed: %d\n", ret);
+		return ERR_PTR(ret);
+	}
+
+	ret = regmap_write(data->regmap, MMA8452_CTRL_REG4, 0);
+	if (ret) {
+		dev_err(dev, "disabling interrupt sources (CTRL_REG4) failed: %d\n", ret);
+		return ERR_PTR(ret);
+	}
+
+	return data;
+}
+
+static void __mma8452_irqoff_exit(struct mma8452_data *data)
+{
+	struct device *dev = &data->client->dev;
+	int ret;
+
+	ret = regmap_write(data->regmap, MMA8452_CTRL_REG4, data->ctrl_reg4);
+	if (ret)
+		dev_err(dev, "restoring CTRL_REG4 failed: %d (interrupts off!)\n", ret);
+}
+
+DEFINE_CLASS(mma8452_irqoff, struct mma8452_data *,
+	     if (_T && !IS_ERR(_T)) __mma8452_irqoff_exit(_T),
+	     __mma8452_irqoff_init(data), struct mma8452_data *data);
+
 static int mma8452_runtime_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
@@ -1936,27 +2052,13 @@ static int mma8452_runtime_suspend(struct device *dev)
 	struct mma8452_data *data = iio_priv(indio_dev);
 	int ret;
 
-	guard(mutex)(&data->lock);
+	CLASS(standby_mode, standby_mode)(data);
+	if (IS_ERR(standby_mode))
+		return PTR_ERR(standby_mode);
 
-	ret = mma8452_standby(data);
-	if (ret < 0) {
-		dev_err(dev, "transition to STANDBY mode failed\n");
-		return -EAGAIN;
-	}
-
-	ret = regmap_read(data->regmap, MMA8452_CTRL_REG4, &data->ctrl_reg4);
-	if (ret) {
-		dev_warn(dev, "backing up CTRL_REG4 failed\n");
-		ret = -EAGAIN;
-		goto out_active;
-	}
-
-	ret = regmap_write(data->regmap, MMA8452_CTRL_REG4, 0);
-	if (ret) {
-		dev_warn(dev, "disabling interrupt sources (CTRL_REG4) failed\n");
-		ret = -EAGAIN;
-		goto out_active;
-	}
+	CLASS(mma8452_irqoff, irqoff)(data);
+	if (IS_ERR(irqoff))
+		return PTR_ERR(irqoff);
 
 	/*
 	 * Interrupt line should be deasserted now, so we just need ensure any
@@ -1970,24 +2072,20 @@ static int mma8452_runtime_suspend(struct device *dev)
 	 * Regulators are about to be cut, so direct register access will not be
 	 * possible.
 	 */
-	mma8452_regmap_cache_only(data);
+	ACQUIRE(mma8452_regmap_cache_only, cache_only)(data);
 
 	ret = regulator_bulk_disable(ARRAY_SIZE(data->regs), data->regs);
 	if (ret) {
 		dev_err(dev, "failed to disable regulators\n");
-		goto out_write_through;
+		return ret;
 	}
 
-	return 0;
+	/* Disable scope-based cleanups to persist all of it on success */
+	cache_only = NULL;
+	irqoff = NULL;
+	mma8452_standby_mode_keep(data);
 
-out_write_through:
-	(void)mma8452_regmap_write_through(data);
-	if (regmap_write(data->regmap, MMA8452_CTRL_REG4, data->ctrl_reg4))
-		dev_warn(dev, "restoring CTRL_REG4 failed\n");
-out_active:
-	if (mma8452_active(data))
-		dev_warn(dev, "failed to switch back to ACTIVE mode\n");
-	return ret;
+	return 0;
 }
 
 static int mma8452_runtime_resume(struct device *dev)
