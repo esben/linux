@@ -857,6 +857,7 @@ static int mma8452_read_event_value(struct iio_dev *indio_dev,
 				    int *val, int *val2)
 {
 	struct mma8452_data *data = iio_priv(indio_dev);
+	struct device *dev = &data->client->dev;
 	int ret, us, power_mode;
 	const struct mma8452_event_regs *ev_regs;
 
@@ -864,37 +865,43 @@ static int mma8452_read_event_value(struct iio_dev *indio_dev,
 	if (ret)
 		return ret;
 
+	PM_RUNTIME_ACQUIRE_IF_ENABLED_AUTOSUSPEND(dev, pm);
+	if (PM_RUNTIME_ACQUIRE_ERR(&pm))
+		return PM_RUNTIME_ACQUIRE_ERR(&pm);
+
 	switch (info) {
 	case IIO_EV_INFO_VALUE:
 		ret = i2c_smbus_read_byte_data(data->client, ev_regs->ev_ths);
 		if (ret < 0)
-			return ret;
+			break;
 
 		*val = ret & ev_regs->ev_ths_mask;
-
-		return IIO_VAL_INT;
+		ret = IIO_VAL_INT;
+		break;
 
 	case IIO_EV_INFO_PERIOD:
 		ret = i2c_smbus_read_byte_data(data->client, ev_regs->ev_count);
 		if (ret < 0)
-			return ret;
+			break;
 
 		power_mode = mma8452_get_power_mode(data);
-		if (power_mode < 0)
-			return power_mode;
+		if (power_mode < 0) {
+			ret = power_mode;
+			break;
+		}
 
 		us = ret * mma8452_time_step_us[power_mode][
 				mma8452_get_odr_index(data)];
 		*val = us / USEC_PER_SEC;
 		*val2 = us % USEC_PER_SEC;
-
-		return IIO_VAL_INT_PLUS_MICRO;
+		ret = IIO_VAL_INT_PLUS_MICRO;
+		break;
 
 	case IIO_EV_INFO_HIGH_PASS_FILTER_3DB:
 		ret = i2c_smbus_read_byte_data(data->client,
 					       MMA8452_TRANSIENT_CFG);
 		if (ret < 0)
-			return ret;
+			break;
 
 		if (ret & MMA8452_TRANSIENT_CFG_HPF_BYP) {
 			*val = 0;
@@ -902,14 +909,17 @@ static int mma8452_read_event_value(struct iio_dev *indio_dev,
 		} else {
 			ret = mma8452_read_hp_filter(data, val, val2);
 			if (ret < 0)
-				return ret;
+				break;
 		}
-
-		return IIO_VAL_INT_PLUS_MICRO;
+		ret = IIO_VAL_INT_PLUS_MICRO;
+		break;
 
 	default:
-		return -EINVAL;
+		ret = -EINVAL;
+		break;
 	}
+
+	return ret;
 }
 
 static int mma8452_write_event_value(struct iio_dev *indio_dev,
@@ -920,6 +930,7 @@ static int mma8452_write_event_value(struct iio_dev *indio_dev,
 				     int val, int val2)
 {
 	struct mma8452_data *data = iio_priv(indio_dev);
+	struct device *dev = &data->client->dev;
 	int ret, reg, steps;
 	const struct mma8452_event_regs *ev_regs;
 
@@ -927,32 +938,44 @@ static int mma8452_write_event_value(struct iio_dev *indio_dev,
 	if (ret)
 		return ret;
 
+	PM_RUNTIME_ACQUIRE_IF_ENABLED_AUTOSUSPEND(dev, pm);
+	if (PM_RUNTIME_ACQUIRE_ERR(&pm))
+		return PM_RUNTIME_ACQUIRE_ERR(&pm);
+
 	switch (info) {
 	case IIO_EV_INFO_VALUE:
-		if (val < 0 || val > ev_regs->ev_ths_mask)
-			return -EINVAL;
+		if (val < 0 || val > ev_regs->ev_ths_mask) {
+			ret = -EINVAL;
+			break;
+		}
 
-		return mma8452_change_config(data, ev_regs->ev_ths, val);
+		ret = mma8452_change_config(data, ev_regs->ev_ths, val);
+		break;
 
 	case IIO_EV_INFO_PERIOD:
 		ret = mma8452_get_power_mode(data);
 		if (ret < 0)
-			return ret;
+			break;
 
 		steps = (val * USEC_PER_SEC + val2) /
 				mma8452_time_step_us[ret][
 					mma8452_get_odr_index(data)];
 
-		if (steps < 0 || steps > 0xff)
-			return -EINVAL;
+		if (steps < 0 || steps > 0xff) {
+			ret = -EINVAL;
+			break;
+		}
 
-		return mma8452_change_config(data, ev_regs->ev_count, steps);
+		ret = mma8452_change_config(data, ev_regs->ev_count, steps);
+		break;
 
 	case IIO_EV_INFO_HIGH_PASS_FILTER_3DB:
 		reg = i2c_smbus_read_byte_data(data->client,
 					       MMA8452_TRANSIENT_CFG);
-		if (reg < 0)
-			return reg;
+		if (reg < 0) {
+			ret = reg;
+			break;
+		}
 
 		if (val == 0 && val2 == 0) {
 			reg |= MMA8452_TRANSIENT_CFG_HPF_BYP;
@@ -960,14 +983,18 @@ static int mma8452_write_event_value(struct iio_dev *indio_dev,
 			reg &= ~MMA8452_TRANSIENT_CFG_HPF_BYP;
 			ret = mma8452_set_hp_filter_frequency(data, val, val2);
 			if (ret < 0)
-				return ret;
+				break;
 		}
 
-		return mma8452_change_config(data, MMA8452_TRANSIENT_CFG, reg);
+		ret = mma8452_change_config(data, MMA8452_TRANSIENT_CFG, reg);
+		break;
 
 	default:
-		return -EINVAL;
+		ret = -EINVAL;
+		break;
 	}
+
+	return ret;
 }
 
 static int mma8452_read_event_config(struct iio_dev *indio_dev,
