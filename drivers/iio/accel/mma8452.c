@@ -835,6 +835,20 @@ static int mma8452_get_event_regs(struct mma8452_data *data,
 	}
 }
 
+/* returns >0 if in motion mode, 0 if not or <0 if an error occurred */
+static int mma8452_motion_mode_enabled(struct mma8452_data *data,
+				       const struct mma8452_event_regs *ev_regs,
+				       const struct iio_chan_spec *chan)
+{
+	int ret;
+
+	ret = i2c_smbus_read_byte_data(data->client, ev_regs->ev_cfg);
+	if (ret < 0)
+		return ret;
+
+	return !!(ret & BIT(chan->scan_index + ev_regs->ev_cfg_chan_shift));
+}
+
 static int mma8452_read_event_value(struct iio_dev *indio_dev,
 				    const struct iio_chan_spec *chan,
 				    enum iio_event_type type,
@@ -965,20 +979,14 @@ static int mma8452_read_event_config(struct iio_dev *indio_dev,
 	int ret;
 	const struct mma8452_event_regs *ev_regs;
 
-	ret = mma8452_get_event_regs(data, chan, dir, &ev_regs);
-	if (ret)
-		return ret;
-
 	switch (dir) {
 	case IIO_EV_DIR_FALLING:
 		return mma8452_freefall_mode_enabled(data);
 	case IIO_EV_DIR_RISING:
-		ret = i2c_smbus_read_byte_data(data->client, ev_regs->ev_cfg);
-		if (ret < 0)
+		ret = mma8452_get_event_regs(data, chan, dir, &ev_regs);
+		if (ret)
 			return ret;
-
-		return !!(ret & BIT(chan->scan_index +
-				ev_regs->ev_cfg_chan_shift));
+		return mma8452_motion_mode_enabled(data, ev_regs, chan);
 	default:
 		return -EINVAL;
 	}
@@ -995,24 +1003,42 @@ static int mma8452_write_event_config(struct iio_dev *indio_dev,
 	int val, ret;
 	const struct mma8452_event_regs *ev_regs;
 
-	ret = mma8452_get_event_regs(data, chan, dir, &ev_regs);
-	if (ret)
-		return ret;
-
-	if (state)
-		ret = pm_runtime_resume_and_get(dev);
-	else
-		ret = pm_runtime_put_autosuspend(dev);
+	switch (dir) {
+	case IIO_EV_DIR_FALLING:
+		ret = mma8452_freefall_mode_enabled(data);
+		break;
+	case IIO_EV_DIR_RISING:
+		ret = mma8452_get_event_regs(data, chan, dir, &ev_regs);
+		if (ret)
+			return ret;
+		ret = mma8452_motion_mode_enabled(data, ev_regs, chan);
+		break;
+	default:
+		ret = -EINVAL;
+	}
 	if (ret < 0)
 		return ret;
 
+	/* Do nothing if requested state is same as current state */
+	if (state == !!ret)
+		return 0;
+
+	if (state) {
+		ret = pm_runtime_resume_and_get(dev);
+		if (ret < 0)
+			return ret;
+	}
+
 	switch (dir) {
 	case IIO_EV_DIR_FALLING:
-		return mma8452_set_freefall_mode(data, state);
+		ret = mma8452_set_freefall_mode(data, state);
+		break;
 	case IIO_EV_DIR_RISING:
 		val = i2c_smbus_read_byte_data(data->client, ev_regs->ev_cfg);
-		if (val < 0)
-			return val;
+		if (val < 0) {
+			ret = val;
+			break;
+		}
 
 		if (state) {
 			if (mma8452_freefall_mode_enabled(data)) {
@@ -1024,8 +1050,10 @@ static int mma8452_write_event_config(struct iio_dev *indio_dev,
 			val |= BIT(chan->scan_index +
 					ev_regs->ev_cfg_chan_shift);
 		} else {
-			if (mma8452_freefall_mode_enabled(data))
-				return 0;
+			if (mma8452_freefall_mode_enabled(data)) {
+				ret = 0;
+				break;
+			}
 
 			val &= ~BIT(chan->scan_index +
 					ev_regs->ev_cfg_chan_shift);
@@ -1033,10 +1061,16 @@ static int mma8452_write_event_config(struct iio_dev *indio_dev,
 
 		val |= ev_regs->ev_cfg_ele;
 
-		return mma8452_change_config(data, ev_regs->ev_cfg, val);
+		ret = mma8452_change_config(data, ev_regs->ev_cfg, val);
+		break;
 	default:
-		return -EINVAL;
+		break; /* Never reached, but compiler likes it this way */
 	}
+
+	if (!state || ret < 0)
+		pm_runtime_put_autosuspend(dev);
+
+	return ret;
 }
 
 static void mma8452_transient_interrupt(struct iio_dev *indio_dev)
